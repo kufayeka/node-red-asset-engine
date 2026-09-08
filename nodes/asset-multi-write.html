@@ -1,0 +1,180 @@
+<script type="text/javascript">
+  (function() {
+    function initAssetPathAutocomplete(input, includeWildcards) {
+      if (!input || !input.length) return;
+
+      var cachedPaths = null;
+      function fetchPaths(cb) {
+        if (cachedPaths !== null) return cb(cachedPaths);
+        $.getJSON("api/assets/hierarchy?populated=true", function(resp) {
+          var paths = [];
+          function collect(nodes) {
+            (nodes || []).forEach(function(n) {
+              var prefix = n.path || n.name;
+              (n.effectiveAttributes || []).forEach(function(attr) {
+                if (attr && attr.name) paths.push(prefix + "." + attr.name);
+              });
+              collect(n.children);
+            });
+          }
+          collect(resp.data || resp);
+          if (includeWildcards) {
+            paths.unshift("*");
+          }
+          cachedPaths = Array.from(new Set(paths));
+          cb(cachedPaths);
+        }).fail(function() {
+          $.getJSON("assets/hierarchy?populated=true", function(resp) {
+            var paths = [];
+            function collect(nodes) {
+              (nodes || []).forEach(function(n) {
+                var prefix = n.path || n.name;
+                (n.effectiveAttributes || []).forEach(function(attr) {
+                  if (attr && attr.name) paths.push(prefix + "." + attr.name);
+                });
+                collect(n.children);
+              });
+            }
+            collect(resp.data || resp);
+            if (includeWildcards) {
+              paths.unshift("*");
+            }
+            cachedPaths = Array.from(new Set(paths));
+            cb(cachedPaths);
+          });
+        });
+      }
+
+      input.autoComplete({
+        minLength: 0,
+        search: function(val, done) {
+          fetchPaths(function(allPaths) {
+            var query = (val || "").trim().toLowerCase();
+            var results = allPaths;
+            if (query) {
+              results = allPaths.filter(function(p) {
+                return p.toLowerCase().indexOf(query) !== -1;
+              });
+            }
+            if (typeof done === "function") {
+              done(results);
+            } else {
+              return results;
+            }
+          });
+        }
+      });
+    }
+
+    RED.nodes.registerType('kufayeka-asset-multi-write', {
+      category: 'Asset Engine',
+      color: '#10B981',
+      defaults: {
+        name: { value: "" },
+        rules: { value: [{ path: "", property: "payload", propertyType: "msg" }] }
+      },
+      inputs: 1,
+      outputs: 1,
+      icon: "font-awesome/fa-pencil-square",
+      label: function() {
+        if (this.name) return this.name;
+        var count = (this.rules || []).filter(function(r) { return r && r.path; }).length;
+        return count > 0 ? "Write " + count + " Paths" : "Asset Multi Write";
+      },
+      paletteLabel: "Asset Multi Write",
+      oneditprepare: function() {
+        var node = this;
+
+        var ruleList = $("#node-input-rules-container").css('min-height', '200px').editableList({
+          addItem: function(container, i, opt) {
+            var rule = opt || {};
+            var pathVal = rule.path || "";
+            var propVal = rule.property !== undefined ? rule.property : "payload";
+            var propType = rule.propertyType || "msg";
+
+            var row = $('<div style="display:flex; flex-direction:column; gap:6px; padding:4px 0;"></div>').appendTo(container);
+
+            // Sub-row 1: Asset Path with live Autocomplete
+            var pathRow = $('<div style="display:flex; align-items:center; gap:8px;"></div>').appendTo(row);
+            $('<span style="width:75px; font-size:11px; font-weight:600; color:var(--red-ui-secondary-text-color, #475569);"><i class="fa fa-cubes"></i> Path</span>').appendTo(pathRow);
+            var pathInput = $('<input type="text" class="node-input-rule-path" style="flex:1;" placeholder="e.g. Plant1.Line1.Motor1.Speed">')
+              .val(pathVal)
+              .appendTo(pathRow);
+            initAssetPathAutocomplete(pathInput, false);
+
+            // Sub-row 2: Source Value with full TypedInput
+            var valRow = $('<div style="display:flex; align-items:center; gap:8px;"></div>').appendTo(row);
+            $('<span style="width:75px; font-size:11px; font-weight:600; color:var(--red-ui-secondary-text-color, #475569);"><i class="fa fa-arrow-left"></i> Value</span>').appendTo(valRow);
+            var valWrapper = $('<div style="flex:1;"></div>').appendTo(valRow);
+            var valInput = $('<input type="text" class="node-input-rule-property" style="width:100%;">').appendTo(valWrapper);
+            var typeInput = $('<input type="hidden" class="node-input-rule-propertyType">').appendTo(valWrapper);
+
+            valInput.typedInput({
+              default: 'msg',
+              typeField: typeInput,
+              types: ['msg', 'flow', 'global', 'str', 'num', 'bool', 'json', 'date', 'env']
+            });
+
+            valInput.typedInput('type', propType);
+            valInput.typedInput('value', propVal);
+          },
+          removable: true,
+          sortable: true
+        });
+
+        if (node.rules && node.rules.length > 0) {
+          node.rules.forEach(function(r) {
+            ruleList.editableList('addItem', r);
+          });
+        } else {
+          ruleList.editableList('addItem', { path: "", property: "payload", propertyType: "msg" });
+        }
+      },
+      oneditsave: function() {
+        var node = this;
+        var rules = [];
+        $("#node-input-rules-container").editableList('items').each(function() {
+          var item = $(this);
+          var path = item.find('.node-input-rule-path').val();
+          var prop = item.find('.node-input-rule-property').typedInput('value');
+          var propType = item.find('.node-input-rule-property').typedInput('type');
+          if (path && path.trim()) {
+            rules.push({
+              path: path.trim(),
+              property: prop,
+              propertyType: propType
+            });
+          }
+        });
+        node.rules = rules;
+      }
+    });
+  })();
+</script>
+
+<script type="text/html" data-template-name="kufayeka-asset-multi-write">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Name">
+  </div>
+  <div class="form-row" style="margin-bottom:4px;">
+    <label><i class="fa fa-list"></i> Write Rules</label>
+  </div>
+  <div class="form-row node-input-rules-container-row">
+    <ol id="node-input-rules-container"></ol>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-asset-multi-write">
+  <p>Writes multiple values into different asset attribute paths in the in-memory Kufayeka Asset Engine in a single step.</p>
+  <h3>Inputs</h3>
+  <dl class="message-properties">
+    <dt class="optional">writes <span class="property-type">array | object</span></dt>
+    <dd>Optional dynamic batch write payload (array of <code>{ path, value }</code> or map of <code>{ [path]: value }</code>) which executes alongside or in place of configured rules.</dd>
+  </dl>
+  <h3>Outputs</h3>
+  <dl class="message-properties">
+    <dt>_assetChanged <span class="property-type">array</span></dt>
+    <dd>Array of all attribute match objects that were successfully written/updated.</dd>
+  </dl>
+</script>

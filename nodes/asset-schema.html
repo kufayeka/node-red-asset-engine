@@ -1,0 +1,95 @@
+<script type="text/javascript">
+  RED.nodes.registerType('kufayeka-asset-schema', {
+    category: 'config',
+    defaults: {
+      name: { value: "" },
+      attributeTemplates: { value: [] },
+      assets: { value: [] },
+      historians: { value: [] }
+    },
+    label: function() {
+      return this.name || "Asset Schema";
+    },
+    oneditprepare: function() {
+      var node = this;
+      var json = {
+        attributeTemplates: node.attributeTemplates || [],
+        assets: node.assets || [],
+        historians: node.historians || []
+      };
+      $("#node-config-input-schemaJson").val(JSON.stringify(json, null, 2));
+
+      $("#node-config-load-current").on("click", function() {
+        $.getJSON("api/assets", function(resp) {
+          var data = (resp && resp.data) || resp || {};
+          var loaded = {
+            attributeTemplates: data.attributeTemplates || [],
+            assets: (data.assets || []).map(function(a) {
+              return { id: a.id, name: a.name, parentId: a.parentId, templateIds: a.templateIds || [] };
+            }),
+            historians: (data.historians || []).filter(function(h) { return h.id !== "default"; })
+          };
+          $("#node-config-input-schemaJson").val(JSON.stringify(loaded, null, 2));
+        });
+      });
+    },
+    oneditsave: function() {
+      var node = this;
+      var raw = $("#node-config-input-schemaJson").val();
+      var parsed;
+      try {
+        parsed = JSON.parse(raw || "{}");
+      } catch (e) {
+        RED.notify("Invalid JSON in asset schema, changes were not applied: " + e.message, "error");
+        parsed = { attributeTemplates: node.attributeTemplates, assets: node.assets, historians: node.historians };
+      }
+      var hasSpaces = false;
+      var rawTemplates = Array.isArray(parsed.attributeTemplates) ? parsed.attributeTemplates : [];
+      var rawAssets = Array.isArray(parsed.assets) ? parsed.assets : [];
+
+      node.attributeTemplates = rawTemplates.map(function(t) {
+        if (t && t.name && /\s/.test(t.name)) hasSpaces = true;
+        if (t) t.name = String(t.name || "").replace(/\s+/g, "_");
+        if (t && Array.isArray(t.attributes)) {
+          t.attributes.forEach(function(attr) {
+            if (attr && attr.name && /\s/.test(attr.name)) hasSpaces = true;
+            if (attr) attr.name = String(attr.name || "").replace(/\s+/g, "_");
+          });
+        }
+        return t;
+      });
+
+      node.assets = rawAssets.map(function(a) {
+        if (a && a.name && /\s/.test(a.name)) hasSpaces = true;
+        if (a) a.name = String(a.name || "").replace(/\s+/g, "_");
+        return a;
+      });
+
+      node.historians = Array.isArray(parsed.historians) ? parsed.historians : [];
+
+      if (hasSpaces) {
+        RED.notify("Warning: Spaces in asset/template/attribute names were automatically replaced with underscores (_).", "warning");
+      }
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="kufayeka-asset-schema">
+  <div class="form-row">
+    <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-config-input-name" placeholder="Name">
+  </div>
+  <div class="form-row">
+    <button type="button" id="node-config-load-current" class="red-ui-button">Load current schema from engine</button>
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-schemaJson">Schema (JSON)</label><br>
+    <textarea id="node-config-input-schemaJson" rows="18" style="width:100%; font-family: monospace;"></textarea>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-asset-schema">
+  <p>Holds the Kufayeka Asset Engine <b>schema</b> — attribute templates and the asset hierarchy structure (id/name/parent/template) — as part of this flow, so it travels with flow export/import and Node-RED Projects (git).</p>
+  <p>On deploy, this schema is applied to the running engine. Live attribute <b>values</b> already held in memory for matching asset ids are preserved — deploying this node never resets your current tag values.</p>
+  <p><b>Note:</b> this node only carries structure. Live values (current tag readings, timestamps) are intentionally kept out of the flow JSON and stay in the engine's runtime store, since they change far too often to belong in a deployed/versioned flow.</p>
+</script>

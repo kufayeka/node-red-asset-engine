@@ -1,0 +1,314 @@
+<script type="text/html" data-template-name="kufayeka-asset-function">
+    <style>
+        .asset-func-tabs-row {
+            margin-bottom: 0;
+        }
+        .asset-func-cheat-sheet {
+            background: var(--red-ui-secondary-background, #f7f7f9);
+            border: 1px solid var(--red-ui-secondary-border-color, #e0e0e0);
+            border-radius: 4px;
+            padding: 10px 12px;
+            font-size: 12px;
+            margin-top: 15px;
+            line-height: 1.5;
+        }
+        .asset-func-cheat-sheet h4 {
+            margin: 0 0 6px 0;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--red-ui-primary-text-color, #333);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .asset-func-cheat-sheet pre {
+            background: var(--red-ui-primary-background, #fff);
+            border: 1px solid var(--red-ui-secondary-border-color, #ddd);
+            border-radius: 3px;
+            padding: 8px 10px;
+            margin: 4px 0 8px 0;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 11px;
+            color: var(--red-ui-primary-text-color, #222);
+            overflow-x: auto;
+        }
+    </style>
+
+    <input type="hidden" id="node-input-func">
+    <input type="hidden" id="node-input-initialize">
+    <input type="hidden" id="node-input-finalize">
+
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Asset function name" style="width: calc(100% - 110px)">
+    </div>
+
+    <div class="form-row asset-func-tabs-row">
+        <ul style="min-width: 600px; margin-bottom: 15px;" id="asset-func-tabs"></ul>
+    </div>
+
+    <div id="asset-func-tabs-content" style="min-height: calc(100% - 95px);">
+        <!-- Setup Tab -->
+        <div id="asset-func-tab-setup" style="display:none">
+            <div style="display: flex; gap: 20px; align-items: center;">
+                <div class="form-row" style="margin-bottom: 0;">
+                    <label for="node-input-outputs"><i class="fa fa-random"></i> Outputs</label>
+                    <input id="node-input-outputs" style="width: 70px;" value="1">
+                </div>
+                <div class="form-row" style="margin-bottom: 0;">
+                    <label for="node-input-timeout"><i class="fa fa-clock-o"></i> Timeout (s)</label>
+                    <input id="node-input-timeout" style="width: 70px;" placeholder="0 (disabled)">
+                </div>
+            </div>
+
+            <div class="asset-func-cheat-sheet">
+                <h4><i class="fa fa-lightbulb-o" style="color: #f39c12;"></i> Asset Path Syntax Cheat Sheet (Autocomplete Supported)</h4>
+                <div>You can directly read and write any Asset Attribute using <code>%</code> prefix or direct dot-notation with full autocomplete:</div>
+                <pre><code>// 1. Direct Read (live attribute value)
+const speed = %Plant1.Line1.Motor1.Speed;
+const temp  = Plant1.Line1.Motor1.Temperature;
+
+// 2. Direct Write (updates asset engine, emits comms, autosaves to disk)
+%Plant1.Line1.Motor1.Speed = msg.payload;
+Plant1.Line1.Motor1.Temperature = 72.5;
+
+// 3. Dynamic / Bracket Access
+const key = "Plant1.Line1.Motor1.Speed";
+const val = $[key];
+$[key] = 1450;
+
+// 4. Asset Helper Methods
+const items = asset.query("Plant1.*.Speed");
+asset.set("Plant1.Line1.Motor1.Speed", 1500);
+msg.payload = { speed, temp };
+return msg;</code></pre>
+            </div>
+        </div>
+
+        <!-- On Start (Initialize) Tab -->
+        <div id="asset-func-tab-init" style="display:none">
+            <div class="form-row node-text-editor-row" style="position:relative">
+                <div style="height: 320px; min-height:180px;" class="node-text-editor" id="node-input-init-editor"></div>
+                <div style="position: absolute; right:0; bottom: calc(100% - 20px); z-index: 10;">
+                    <button type="button" id="node-init-expand-js" class="red-ui-button red-ui-button-small"><i class="fa fa-expand"></i></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- On Message (Function Body) Tab -->
+        <div id="asset-func-tab-body" style="display:none">
+            <div class="form-row node-text-editor-row" style="position:relative">
+                <div style="height: 320px; min-height:180px;" class="node-text-editor" id="node-input-func-editor"></div>
+                <div style="position: absolute; right:0; bottom: calc(100% - 20px); z-index: 10;">
+                    <button type="button" id="node-func-expand-js" class="red-ui-button red-ui-button-small"><i class="fa fa-expand"></i></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- On Stop (Finalize) Tab -->
+        <div id="asset-func-tab-finalize" style="display:none">
+            <div class="form-row node-text-editor-row" style="position:relative">
+                <div style="height: 320px; min-height:180px;" class="node-text-editor" id="node-input-finalize-editor"></div>
+                <div style="position: absolute; right:0; bottom: calc(100% - 20px); z-index: 10;">
+                    <button type="button" id="node-finalize-expand-js" class="red-ui-button red-ui-button-small"><i class="fa fa-expand"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-asset-function">
+    <p>A JavaScript function block with native <b>Kufayeka Asset Engine</b> recognition and full Monaco/Ace autocomplete.</p>
+    <h3>Asset Path Features</h3>
+    <ul>
+        <li><b>Read Asset Attributes:</b> <code>const val = $Plant1.Line1.Motor1.Speed;</code> or <code>const val = %Plant1.Line1.Motor1.Speed;</code></li>
+        <li><b>Write Asset Attributes:</b> <code>$Plant1.Line1.Motor1.Speed = msg.payload;</code> or <code>%Plant1.Line1.Motor1.Temperature = 75;</code></li>
+        <li><b>Dynamic Bracket Access:</b> <code>const v = $["Plant1.Line1.Motor1.Speed"];</code></li>
+        <li><b>Native Node-RED Builtins:</b> <code>msg</code>, <code>node.send()</code>, <code>node.status()</code>, <code>node.error()</code>, <code>flow</code>, <code>global</code>, <code>context</code>, <code>env</code>.</li>
+        <li><b>Asset API:</b> <code>asset.get(path)</code>, <code>asset.set(path, val)</code>, <code>asset.query(pattern)</code>, <code>asset.find(pattern, val)</code>.</li>
+    </ul>
+</script>
+
+<script type="text/javascript">
+(function() {
+    RED.nodes.registerType("kufayeka-asset-function", {
+        category: "kufayeka asset",
+        color: "#00897b",
+        defaults: {
+            name: { value: "" },
+            func: { value: "\n// Direct Asset Read & Write with Autocomplete:\n// const speed = $Plant1.Line1.Motor1.Speed;\n// $Plant1.Line1.Motor1.Speed = msg.payload;\n\nreturn msg;" },
+            outputs: { value: 1 },
+            timeout: { value: 0 },
+            initialize: { value: "" },
+            finalize: { value: "" }
+        },
+        inputs: 1,
+        outputs: 1,
+        icon: "font-awesome/fa-code",
+        label: function() {
+            return this.name || "asset function";
+        },
+        labelStyle: function() {
+            return this.name ? "node_label_italic" : "";
+        },
+        paletteLabel: "asset function",
+        oneditprepare: function() {
+            var that = this;
+
+            var tabs = RED.tabs.create({
+                id: "asset-func-tabs",
+                onchange: function(tab) {
+                    $("#asset-func-tabs-content").children().hide();
+                    $("#" + tab.id).show();
+                    var editor = $("#" + tab.id).find(".monaco-editor, .ace_editor").first();
+                    if (editor.length) {
+                        RED.tray.resize();
+                        if (that.initEditor && that.initEditor.focus && tab.id === "asset-func-tab-init") {
+                            that.initEditor.focus();
+                        } else if (that.editor && that.editor.focus && tab.id === "asset-func-tab-body") {
+                            that.editor.focus();
+                        } else if (that.finalizeEditor && that.finalizeEditor.focus && tab.id === "asset-func-tab-finalize") {
+                            that.finalizeEditor.focus();
+                        }
+                    }
+                }
+            });
+
+            tabs.addTab({
+                id: "asset-func-tab-setup",
+                iconClass: "fa fa-cog",
+                label: "Setup"
+            });
+            tabs.addTab({
+                id: "asset-func-tab-init",
+                label: "On Start"
+            });
+            tabs.addTab({
+                id: "asset-func-tab-body",
+                label: "On Message"
+            });
+            tabs.addTab({
+                id: "asset-func-tab-finalize",
+                label: "On Stop"
+            });
+
+            tabs.activateTab("asset-func-tab-body");
+
+            $("#node-input-outputs").spinner({ min: 0, max: 50 });
+            $("#node-input-timeout").spinner({ min: 0 });
+
+            var editorGlobals = {
+                msg: true,
+                node: true,
+                context: true,
+                flow: true,
+                global: true,
+                env: true,
+                RED: true,
+                util: true,
+                console: true,
+                Buffer: true,
+                Date: true,
+                setTimeout: true,
+                clearTimeout: true,
+                setInterval: true,
+                clearInterval: true,
+                $: true,
+                asset: true
+            };
+
+            // Main Editor
+            this.editor = RED.editor.createEditor({
+                id: "node-input-func-editor",
+                mode: "ace/mode/nrjavascript",
+                value: $("#node-input-func").val(),
+                globals: editorGlobals
+            });
+
+            // Initialize Editor
+            this.initEditor = RED.editor.createEditor({
+                id: "node-input-init-editor",
+                mode: "ace/mode/nrjavascript",
+                value: $("#node-input-initialize").val(),
+                globals: editorGlobals
+            });
+
+            // Finalize Editor
+            this.finalizeEditor = RED.editor.createEditor({
+                id: "node-input-finalize-editor",
+                mode: "ace/mode/nrjavascript",
+                value: $("#node-input-finalize").val(),
+                globals: editorGlobals
+            });
+
+            // Expand buttons
+            $("#node-func-expand-js").on("click", function(e) {
+                e.preventDefault();
+                RED.editor.editJavaScript({
+                    value: that.editor.getValue(),
+                    globals: editorGlobals,
+                    complete: function(v) {
+                        that.editor.setValue(v, -1);
+                    }
+                });
+            });
+
+            $("#node-init-expand-js").on("click", function(e) {
+                e.preventDefault();
+                RED.editor.editJavaScript({
+                    value: that.initEditor.getValue(),
+                    globals: editorGlobals,
+                    complete: function(v) {
+                        that.initEditor.setValue(v, -1);
+                    }
+                });
+            });
+
+            $("#node-finalize-expand-js").on("click", function(e) {
+                e.preventDefault();
+                RED.editor.editJavaScript({
+                    value: that.finalizeEditor.getValue(),
+                    globals: editorGlobals,
+                    complete: function(v) {
+                        that.finalizeEditor.setValue(v, -1);
+                    }
+                });
+            });
+        },
+        oneditsave: function() {
+            $("#node-input-func").val(this.editor.getValue());
+            $("#node-input-initialize").val(this.initEditor.getValue());
+            $("#node-input-finalize").val(this.finalizeEditor.getValue());
+
+            this.editor.destroy();
+            delete this.editor;
+            this.initEditor.destroy();
+            delete this.initEditor;
+            this.finalizeEditor.destroy();
+            delete this.finalizeEditor;
+        },
+        oneditcancel: function() {
+            this.editor.destroy();
+            delete this.editor;
+            this.initEditor.destroy();
+            delete this.initEditor;
+            this.finalizeEditor.destroy();
+            delete this.finalizeEditor;
+        },
+        oneditresize: function(size) {
+            var rows = $("#dialog-form>div:not(#asset-func-tabs-content)");
+            var height = size.height;
+            for (var i = 0; i < rows.length; i++) {
+                height -= $(rows[i]).outerHeight(true);
+            }
+            var editorRow = $("#asset-func-tabs-content");
+            height -= (parseInt(editorRow.css("marginTop")) + parseInt(editorRow.css("marginBottom")));
+            $(".node-text-editor").css("height", (height - 30) + "px");
+
+            if (this.editor && this.editor.resize) this.editor.resize();
+            if (this.initEditor && this.initEditor.resize) this.initEditor.resize();
+            if (this.finalizeEditor && this.finalizeEditor.resize) this.finalizeEditor.resize();
+        }
+    });
+})();
+</script>

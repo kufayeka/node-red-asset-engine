@@ -1,0 +1,45 @@
+<script type="text/javascript">
+    RED.nodes.registerType('kufayeka-inject', {
+        category: 'Asset Engine',
+        color: '#F59E0B',
+        defaults: {
+            name: { value: "" },
+            schedule: { value: "", type: "kufayeka-trigger-schedule", required: true },
+            topic: { value: "" }
+        },
+        inputs: 0,
+        outputs: 1,
+        icon: "font-awesome/fa-repeat",
+        paletteLabel: "trigger inject",
+        label: function() {
+            return this.name || "Trigger Inject";
+        }
+    });
+</script>
+
+<script type="text/html" data-template-name="kufayeka-inject">
+    <div class="form-row">
+        <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name">
+    </div>
+    <div class="form-row">
+        <label for="node-input-schedule"><i class="fa fa-clock-o"></i> Schedule</label>
+        <input type="text" id="node-input-schedule">
+    </div>
+    <div class="form-row">
+        <label for="node-input-topic"><i class="fa fa-tasks"></i> Topic</label>
+        <input type="text" id="node-input-topic" placeholder="(optional)">
+    </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-inject">
+    <p>Sends a message every time the referenced <b>Trigger Schedule</b> fires. Multiple Kufayeka Inject nodes — and attribute calculation scripts set to "shared trigger schedule" — can all point at the SAME schedule so they fire from the identical clock tick instead of drifting relative to each other.</p>
+    <p>Manage schedules (interval / interval between times / at a specific time) from the <b>Trigger Schedules</b> sidebar tab, or via the pencil icon next to the Schedule field above.</p>
+    <h3>Outputs</h3>
+    <dl class="message-properties">
+        <dt>payload <span class="property-type">number</span></dt>
+        <dd>Timestamp (ms) of the trigger.</dd>
+        <dt>topic <span class="property-type">string</span></dt>
+        <dd>The configured topic, if any.</dd>
+    </dl>
+</script>

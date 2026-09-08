@@ -1,0 +1,71 @@
+{
+  "assets": [
+    {
+      "id": "m1",
+      "name": "Motor1",
+      "parentId": null,
+      "templateIds": [
+        "tmpl-motor"
+      ],
+      "attributes": {
+        "Speed": {
+          "value": 3450,
+          "ts": "2026-09-08T09:19:13.062Z"
+        }
+      }
+    }
+  ],
+  "attributeTemplates": [
+    {
+      "id": "tmpl-motor",
+      "name": "MotorTemplate",
+      "description": "",
+      "attributes": [
+        {
+          "enabled": true,
+          "name": "Speed",
+          "description": "",
+          "valueType": "number",
+          "default": 0,
+          "unit": "",
+          "script": {
+            "enabled": false,
+            "code": "",
+            "trigger": {
+              "mode": "onChange",
+              "scheduleId": "",
+              "runPolicy": "always",
+              "triggerNodeId": "",
+              "watch": []
+            }
+          },
+          "historianEnabled": false,
+          "historianTimeSourcePath": "",
+          "historianTargetId": "default",
+          "dashboardVisible": false,
+          "dashboardEditable": true,
+          "nullable": false,
+          "inputType": "text",
+          "options": [],
+          "optionsScript": "",
+          "numberMin": null,
+          "numberMax": null,
+          "numberAllowNegative": true,
+          "numberUseThousandSeparator": false,
+          "numberPrefix": "",
+          "numberSuffix": "",
+          "numberAllowDecimal": true,
+          "numberPrecision": 2
+        }
+      ]
+    }
+  ],
+  "historians": [
+    {
+      "id": "default",
+      "name": "Default Historian",
+      "timestampUnit": "us",
+      "enabled": true
+    }
+  ]
+}

@@ -1,0 +1,283 @@
+<script type="text/html" data-template-name="kufayeka-trigger-schedule">
+    <div class="form-row">
+        <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+        <input type="text" id="node-config-input-name" placeholder="Name">
+    </div>
+
+    <div class="form-row" id="kufayeka-trigger-once">
+        <label for="node-config-input-once">&nbsp;</label>
+        <input type="checkbox" id="node-config-input-once" style="display:inline-block; width:15px; vertical-align:baseline;">
+        <span>fire once, right after deploy, then</span>&nbsp;
+        <input type="text" id="node-config-input-onceDelay" placeholder="0.1" style="width:45px; height:28px;">&nbsp;
+        <span>seconds delay</span>
+    </div>
+
+    <div class="form-row">
+        <label for=""><i class="fa fa-repeat"></i> Trigger</label>
+        <select id="kufayeka-trigger-time-type-select">
+            <option value="none">- none -</option>
+            <option value="interval">interval</option>
+            <option value="interval-time">interval between times</option>
+            <option value="time">at a specific time</option>
+        </select>
+        <input type="hidden" id="node-config-input-repeat">
+        <input type="hidden" id="node-config-input-crontab">
+    </div>
+
+    <div class="form-row kufayeka-trigger-time-row hidden" id="kufayeka-trigger-time-row-interval">
+        <span>every</span>
+        <input id="kufayeka-trigger-time-interval-count" class="kufayeka-trigger-time-count" value="1">
+        <select style="width:100px" id="kufayeka-trigger-time-interval-units">
+            <option value="s">seconds</option>
+            <option value="m">minutes</option>
+            <option value="h">hours</option>
+        </select><br>
+    </div>
+
+    <div class="form-row kufayeka-trigger-time-row hidden" id="kufayeka-trigger-time-row-interval-time">
+        <span>every</span> <select style="width:90px; margin-left:20px;" id="kufayeka-trigger-time-interval-time-units" class="kufayeka-trigger-time-int-count" value="1">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+            <option value="6">6</option>
+            <option value="10">10</option>
+            <option value="12">12</option>
+            <option value="15">15</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+            <option value="0">60</option>
+        </select> <span>minutes</span><br>
+        <span>between</span> <select id="kufayeka-trigger-time-interval-time-start" class="kufayeka-trigger-time-times"></select>
+        <span>and</span> <select id="kufayeka-trigger-time-interval-time-end" class="kufayeka-trigger-time-times"></select><br>
+        <div id="kufayeka-trigger-time-interval-time-days" class="kufayeka-trigger-time-days" style="margin-top:5px">
+            <div style="display:inline-block; vertical-align:top; margin-right:5px;">on</div>
+            <div style="display:inline-block;">
+                <div>
+                    <label><input type='checkbox' checked value='1'> <span>Mon</span></label>
+                    <label><input type='checkbox' checked value='2'> <span>Tue</span></label>
+                    <label><input type='checkbox' checked value='3'> <span>Wed</span></label>
+                </div>
+                <div>
+                    <label><input type='checkbox' checked value='4'> <span>Thu</span></label>
+                    <label><input type='checkbox' checked value='5'> <span>Fri</span></label>
+                    <label><input type='checkbox' checked value='6'> <span>Sat</span></label>
+                </div>
+                <div>
+                    <label><input type='checkbox' checked value='0'> <span>Sun</span></label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="form-row kufayeka-trigger-time-row hidden" id="kufayeka-trigger-time-row-time">
+        <span>at</span> <input type="text" id="kufayeka-trigger-time-time" value="12:00"><br>
+        <div id="kufayeka-trigger-time-time-days" class="kufayeka-trigger-time-days">
+            <div style="display:inline-block; vertical-align:top; margin-right:5px;">on</div>
+            <div style="display:inline-block;">
+                <div>
+                    <label><input type='checkbox' checked value='1'> <span>Mon</span></label>
+                    <label><input type='checkbox' checked value='2'> <span>Tue</span></label>
+                    <label><input type='checkbox' checked value='3'> <span>Wed</span></label>
+                </div>
+                <div>
+                    <label><input type='checkbox' checked value='4'> <span>Thu</span></label>
+                    <label><input type='checkbox' checked value='5'> <span>Fri</span></label>
+                    <label><input type='checkbox' checked value='6'> <span>Sat</span></label>
+                </div>
+                <div>
+                    <label><input type='checkbox' checked value='0'> <span>Sun</span></label>
+                </div>
+            </div>
+        </div>
+    </div>
+</script>
+
+<style>
+    .kufayeka-trigger-time-row { padding-left: 110px; }
+    .kufayeka-trigger-time-row:not(#kufayeka-trigger-time-row-interval) select { margin: 3px 0; }
+    .kufayeka-trigger-time-days label { -webkit-user-select: none; user-select: none; vertical-align: baseline; width: 100px; }
+    .kufayeka-trigger-time-days input { width: auto !important; vertical-align: baseline !important; }
+    .kufayeka-trigger-time-times { width: 90px !important; }
+    #kufayeka-trigger-time-time { width: 75px; margin-left: 8px; margin-bottom: 8px; }
+    .kufayeka-trigger-time-count { padding-left: 3px !important; width: 80px !important; }
+</style>
+
+<script type="text/javascript">
+    RED.nodes.registerType('kufayeka-trigger-schedule', {
+        category: 'config',
+        defaults: {
+            name: { value: "" },
+            repeat: { value: "" },
+            crontab: { value: "" },
+            once: { value: false },
+            onceDelay: { value: 0.1 }
+        },
+        label: function() {
+            return this.name || "Trigger Schedule";
+        },
+        oneditprepare: function() {
+            var node = this;
+
+            $("#kufayeka-trigger-time-type-select").on("change", function() {
+                $("#node-config-input-crontab").val('');
+                var id = $("#kufayeka-trigger-time-type-select").val();
+                $(".kufayeka-trigger-time-row").hide();
+                $("#kufayeka-trigger-time-row-" + id).show();
+            });
+
+            $("#node-config-input-once").on("change", function() {
+                $("#node-config-input-onceDelay").attr('disabled', !$("#node-config-input-once").prop('checked'));
+            });
+
+            $(".kufayeka-trigger-time-times").each(function() {
+                for (var i = 0; i < 24; i++) {
+                    var l = (i < 10 ? "0" : "") + i + ":00";
+                    $(this).append($("<option></option>").val(i).text(l));
+                }
+            });
+            $("<option></option>").val(24).text("00:00").appendTo("#kufayeka-trigger-time-interval-time-end");
+            $("#kufayeka-trigger-time-interval-time-start").on("change", function() {
+                var start = Number($("#kufayeka-trigger-time-interval-time-start").val());
+                var end = Number($("#kufayeka-trigger-time-interval-time-end").val());
+                $("#kufayeka-trigger-time-interval-time-end option").remove();
+                for (var i = start + 1; i < 25; i++) {
+                    var l = (i < 10 ? "0" : "") + i + ":00";
+                    if (i == 24) l = "00:00";
+                    var opt = $("<option></option>").val(i).text(l).appendTo("#kufayeka-trigger-time-interval-time-end");
+                    if (i === end) opt.attr("selected", "selected");
+                }
+            });
+
+            $(".kufayeka-trigger-time-count").spinner({ min: 1 });
+
+            var repeattype = "none";
+            if (node.repeat != "" && node.repeat != 0) {
+                repeattype = "interval";
+                var r = "s";
+                var c = Number(node.repeat) || 1;
+                if (c % 3600 === 0) { r = "h"; c = c / 3600; }
+                else if (c % 60 === 0) { r = "m"; c = c / 60; }
+                $("#kufayeka-trigger-time-interval-count").val(c);
+                $("#kufayeka-trigger-time-interval-units").val(r);
+            } else if (node.crontab) {
+                var cronparts = String(node.crontab).trim().split(" ");
+                var days = cronparts[4];
+                if (!isNaN(cronparts[0]) && !isNaN(cronparts[1])) {
+                    repeattype = "time";
+                    var time = (cronparts[1].length === 1 ? "0" + cronparts[1] : cronparts[1]) + ":" + (cronparts[0].length === 1 ? "0" + cronparts[0] : cronparts[0]);
+                    $("#kufayeka-trigger-time-time").val(time);
+                    if (days == "*" || !days) {
+                        $("#kufayeka-trigger-time-time-days input[type=checkbox]").prop("checked", true);
+                    } else {
+                        $("#kufayeka-trigger-time-time-days input[type=checkbox]").removeAttr("checked");
+                        days.split(",").forEach(function(v) {
+                            $("#kufayeka-trigger-time-time-days [value=" + v + "]").prop("checked", true);
+                        });
+                    }
+                } else {
+                    repeattype = "interval-time";
+                    var minutes = cronparts[0].replace("*/", "");
+                    if (minutes === "") minutes = "0";
+                    $("#kufayeka-trigger-time-interval-time-units").val(minutes);
+                    if (days == "*" || !days) {
+                        $("#kufayeka-trigger-time-interval-time-days input[type=checkbox]").prop("checked", true);
+                    } else {
+                        $("#kufayeka-trigger-time-interval-time-days input[type=checkbox]").removeAttr("checked");
+                        days.split(",").forEach(function(v) {
+                            $("#kufayeka-trigger-time-interval-time-days [value=" + v + "]").prop("checked", true);
+                        });
+                    }
+                    var timeStr = cronparts[1];
+                    var timeparts = timeStr.split(",");
+                    var start, end;
+                    if (timeparts.length == 1) {
+                        var hours = timeparts[0].split("-");
+                        if (hours.length == 1) {
+                            if (hours[0] === "") { start = "0"; end = "0"; }
+                            else { start = hours[0]; end = Number(hours[0]) + 1; }
+                        } else {
+                            start = hours[0]; end = Number(hours[1]) + 1;
+                        }
+                    } else {
+                        var startparts = timeparts[0].split("-");
+                        start = startparts[0];
+                        var endparts = timeparts[1].split("-");
+                        end = endparts.length == 1 ? Number(endparts[0]) + 1 : Number(endparts[1]) + 1;
+                    }
+                    $("#kufayeka-trigger-time-interval-time-end").val(end);
+                    $("#kufayeka-trigger-time-interval-time-start").val(start);
+                }
+            }
+
+            $("#kufayeka-trigger-time-type-select").val(repeattype);
+            $("#kufayeka-trigger-time-interval-time-start").trigger("change");
+            $(".kufayeka-trigger-time-row").hide();
+            $("#kufayeka-trigger-time-row-" + repeattype).show();
+            $("#node-config-input-onceDelay").attr('disabled', !node.once);
+        },
+        oneditsave: function() {
+            var repeat = "";
+            var crontab = "";
+            var type = $("#kufayeka-trigger-time-type-select").val();
+            if (type == "interval") {
+                var count = Number($("#kufayeka-trigger-time-interval-count").val()) || 1;
+                var units = $("#kufayeka-trigger-time-interval-units").val();
+                if (units == "s") {
+                    repeat = count;
+                } else if (units == "m") {
+                    repeat = count * 60;
+                } else if (units == "h") {
+                    repeat = count * 3600;
+                }
+            } else if (type == "interval-time") {
+                var count = $("#kufayeka-trigger-time-interval-time-units").val();
+                var startTime = Number($("#kufayeka-trigger-time-interval-time-start").val());
+                var endTime = Number($("#kufayeka-trigger-time-interval-time-end").val());
+                var days = $('#kufayeka-trigger-time-interval-time-days input[type=checkbox]:checked').map(function(_, el) {
+                    return $(el).val();
+                }).get();
+                if (days.length > 0) {
+                    days = days.length == 7 ? "*" : days.join(",");
+                    var timerange = "";
+                    if (endTime == 0) {
+                        timerange = startTime + "-23";
+                    } else if (startTime + 1 < endTime) {
+                        timerange = startTime + "-" + (endTime - 1);
+                    } else if (startTime + 1 == endTime) {
+                        timerange = startTime;
+                    } else {
+                        var startpart = startTime == 23 ? "23" : startTime + "-23";
+                        var endpart = endTime == 1 ? "0" : "0-" + (endTime - 1);
+                        timerange = startpart + "," + endpart;
+                    }
+                    crontab = count === "0" ? ("0 " + timerange + " * * " + days) : ("*/" + count + " " + timerange + " * * " + days);
+                }
+            } else if (type == "time") {
+                var time = $("#kufayeka-trigger-time-time").val();
+                var days = $('#kufayeka-trigger-time-time-days input[type=checkbox]:checked').map(function(_, el) {
+                    return $(el).val();
+                }).get();
+                if (days.length > 0) {
+                    days = days.length == 7 ? "*" : days.join(",");
+                    var parts = time.split(":");
+                    if (parts.length === 2) {
+                        parts[1] = ("00" + (parseInt(parts[1]) % 60)).substr(-2);
+                        parts[0] = ("00" + (parseInt(parts[0]) % 24)).substr(-2);
+                        crontab = parts[1] + " " + parts[0] + " * * " + days;
+                    }
+                }
+            }
+
+            $("#node-config-input-repeat").val(repeat);
+            $("#node-config-input-crontab").val(crontab);
+            this.repeat = repeat;
+            this.crontab = crontab;
+        }
+    });
+</script>
+
+<script type="text/html" data-help-name="kufayeka-trigger-schedule">
+    <p>A single, shared schedule (interval / interval-between-times / at a specific time) that multiple consumers can subscribe to — attribute calculation scripts with a timed trigger, and any future node built to use it. Behaves exactly like the built-in <b>inject</b> node's scheduling options, just centralized: every subscriber fires from the SAME clock instead of each running its own independent timer.</p>
+</script>

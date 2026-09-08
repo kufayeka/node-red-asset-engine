@@ -1,0 +1,2550 @@
+<style id="kufayeka-asset-engine-styles">
+.kufayeka-asset-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin-top: 6px;
+    font-size: 12px;
+}
+.kufayeka-asset-table thead th {
+    background: var(--red-ui-tertiary-background, #f8fafc);
+    color: var(--red-ui-secondary-text-color, #475569);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 8px 12px;
+    border-bottom: 2px solid var(--red-ui-secondary-border-color, #e2e8f0);
+    text-align: left;
+    white-space: nowrap;
+}
+.kufayeka-asset-table tbody tr {
+    border-bottom: 1px solid var(--red-ui-secondary-border-color, #f1f5f9);
+    transition: background-color 0.2s ease;
+}
+.kufayeka-asset-table tbody tr:hover {
+    background-color: var(--red-ui-list-item-hover-background, rgba(0, 0, 0, 0.025));
+}
+.kufayeka-asset-table tbody td {
+    padding: 7px 12px;
+    vertical-align: middle;
+    border-bottom: 1px solid var(--red-ui-secondary-border-color, #f1f5f9);
+}
+.kufayeka-pulse-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 5px;
+}
+.kufayeka-pulse-live {
+    background-color: #10b981;
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+    animation: kufayeka-pulse 1.8s infinite;
+}
+@keyframes kufayeka-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+    70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+</style>
+
+<script type="text/javascript">
+(function () {
+    if (typeof RED === "undefined") return;
+
+    // ==========================================
+    // 1. CORE UTILITIES
+    // ==========================================
+/**
+ * Shared utility functions for Kufayeka Asset Engine editor.
+ */
+
+// Generate a random unique identifier with optional prefix
+function makeId(prefix) {
+    return (prefix || "id") + "_" + Math.random().toString(36).substr(2, 9);
+}
+
+// Auto-replace whitespace with underscore for identifiers
+function sanitizeIdentifier(str) {
+    if (str == null) return "";
+    return String(str).replace(/\s+/g, "_");
+}
+
+// Computes all available attribute full paths from the staged globalSection and globalHierarchyById
+function getAllAttributePaths(globalSection, globalHierarchyById) {
+    var paths = [];
+    if (globalHierarchyById && Object.keys(globalHierarchyById).length > 0) {
+        Object.values(globalHierarchyById).forEach(function (hNode) {
+            var prefix = hNode.path || hNode.name;
+            (hNode.effectiveAttributes || []).forEach(function (attr) {
+                if (attr && attr.name) {
+                    paths.push(prefix + "." + attr.name);
+                }
+            });
+        });
+    }
+
+    if (globalSection && globalSection.assets) {
+        var assetById = {};
+        globalSection.assets.forEach(function (a) { assetById[a.id] = a; });
+        function getAssetPath(id) {
+            var a = assetById[id];
+            if (!a) return "";
+            if (!a.parentId) return a.name || a.id;
+            return getAssetPath(a.parentId) + "." + (a.name || a.id);
+        }
+
+        globalSection.assets.forEach(function (a) {
+            var aPath = getAssetPath(a.id);
+            (a.templateIds || []).forEach(function (tplId) {
+                var tpl = (globalSection.attributeTemplates || []).find(function (t) { return t.id === tplId; });
+                if (tpl) {
+                    (tpl.attributes || []).forEach(function (attr) {
+                        if (attr && attr.enabled !== false && attr.name) {
+                            paths.push(aPath + "." + attr.name);
+                        }
+                    });
+                }
+            });
+            Object.keys(a.attributes || {}).forEach(function (attrName) {
+                paths.push(aPath + "." + attrName);
+            });
+        });
+    }
+
+    return Array.from(new Set(paths)).filter(Boolean).sort();
+}
+
+window.KufayekaUtils = {
+    makeId: makeId,
+    sanitizeIdentifier: sanitizeIdentifier,
+    getAllAttributePaths: getAllAttributePaths
+};
+
+    // ==========================================
+    // 2. SCHEMA STORE & STAGING BRIDGE
+    // ==========================================
+/**
+ * Schema Store & Node-RED Config Node bridge for Kufayeka Asset Engine editor.
+ */
+
+(function () {
+    var globalSection = null;
+    var globalHierarchyById = {};
+
+    function getGlobalSection() {
+        return globalSection;
+    }
+
+    function setGlobalSection(val) {
+        globalSection = val;
+    }
+
+    function getGlobalHierarchyById() {
+        return globalHierarchyById;
+    }
+
+    function setGlobalHierarchyById(val) {
+        globalHierarchyById = val || {};
+    }
+
+    // Schema (asset hierarchy structure + attribute templates) is staged into a
+    // hidden config node and only takes effect on Deploy — exactly like editing
+    // any other node's config. Live attribute VALUES are a separate concern and
+    // keep going through the instant "api/assets/value/*" endpoint (untouched).
+    function getOrCreateAssetSchemaNode() {
+        var found = null;
+        RED.nodes.eachConfig(function (n) {
+            if (!found && n.type === "kufayeka-asset-schema") found = n;
+        });
+        if (!found) {
+            found = {
+                id: RED.nodes.id(),
+                type: "kufayeka-asset-schema",
+                name: "Asset Schema",
+                attributeTemplates: [],
+                assets: [],
+                historians: [],
+                users: []
+            };
+            // RED.nodes.add() needs the type definition attached as _def before it will
+            // accept the node (it dereferences _def internally) — mirrors how the editor
+            // itself builds a new node from RED.nodes.getType(type) in view.js.
+            found._def = RED.nodes.getType("kufayeka-asset-schema");
+            RED.nodes.add(found);
+        }
+        return found;
+    }
+
+    function saveSchemaToConfigNode(callback) {
+        var schemaNode = getOrCreateAssetSchemaNode();
+        var hasSpaces = false;
+        var sanitize = (window.KufayekaUtils && window.KufayekaUtils.sanitizeIdentifier) || function (s) { return String(s || "").replace(/\s+/g, "_"); };
+
+        var attributeTemplates = (globalSection.attributeTemplates || []).map(function (t) {
+            var tName = String(t.name || "");
+            if (/\s/.test(tName)) hasSpaces = true;
+            t.name = sanitize(tName);
+            if (Array.isArray(t.attributes)) {
+                t.attributes = t.attributes.map(function (attr) {
+                    var aName = String(attr.name || "");
+                    if (/\s/.test(aName)) hasSpaces = true;
+                    attr.name = sanitize(aName);
+                    return attr;
+                });
+            }
+            return t;
+        });
+
+        var assets = (globalSection.assets || []).map(function (a) {
+            var aName = String(a.name || "");
+            if (/\s/.test(aName)) hasSpaces = true;
+            var cleanName = sanitize(aName);
+            a.name = cleanName;
+            return { id: a.id, name: cleanName, parentId: a.parentId, templateIds: a.templateIds || [] };
+        });
+
+        schemaNode.attributeTemplates = attributeTemplates;
+        schemaNode.assets = assets;
+        schemaNode.historians = (globalSection.historians || []).filter(function (h) { return h.id !== "default"; });
+        RED.nodes.dirty(true);
+
+        if (hasSpaces) {
+            RED.notify("Warning: Spaces in asset/template/attribute names were automatically replaced with underscores (_).", "warning");
+        } else {
+            RED.notify("Schema change staged — click Deploy to apply", "success");
+        }
+        if (callback) callback();
+    }
+
+    window.KufayekaSchemaStore = {
+        getGlobalSection: getGlobalSection,
+        setGlobalSection: setGlobalSection,
+        getGlobalHierarchyById: getGlobalHierarchyById,
+        setGlobalHierarchyById: setGlobalHierarchyById,
+        getOrCreateAssetSchemaNode: getOrCreateAssetSchemaNode,
+        saveSchemaToConfigNode: saveSchemaToConfigNode
+    };
+})();
+
+    // ==========================================
+    // 3. REUSABLE UI COMPONENTS
+    // ==========================================
+/**
+ * Reusable Trigger Schedule Picker Form Component.
+ * Builds UI for interval, interval-between-times, specific-time, days picker, and delay.
+ */
+
+function buildTriggerSchedulePicker(container, node, onChange) {
+    var uid = "kufayeka-sched-" + (node.id || Math.random().toString(36).slice(2));
+
+    var rowOnce = $('<div class="form-row"></div>').appendTo(container);
+    $('<label>&nbsp;</label>').appendTo(rowOnce);
+    var onceCheckbox = $('<input type="checkbox" style="display:inline-block; width:15px; vertical-align:baseline; margin:0 6px 0 0; cursor:pointer;">')
+        .prop("checked", node.once === true)
+        .appendTo(rowOnce);
+    $('<span>Fire once after</span>&nbsp;').appendTo(rowOnce);
+    var onceDelayInput = $('<input type="text" placeholder="0.1" style="width:45px; height:28px; display:inline-block; margin:0 4px; text-align:center;">')
+        .val(node.onceDelay !== undefined ? node.onceDelay : 0.1)
+        .appendTo(rowOnce);
+    $('<span>&nbsp;seconds delay (in addition to any schedule below)</span>').appendTo(rowOnce);
+
+    var rowTypeSelect = $('<div class="form-row" style="margin-top:10px;"></div>').appendTo(container);
+    $('<label><i class="fa fa-repeat"></i> Schedule</label>').appendTo(rowTypeSelect);
+    var typeSelect = $('<select style="width: calc(100% - 110px);"></select>').appendTo(rowTypeSelect);
+    [
+        { value: "none", label: "none" },
+        { value: "interval", label: "interval" },
+        { value: "interval-time", label: "interval between times" },
+        { value: "time", label: "at a specific time" }
+    ].forEach(function (opt) { $("<option>").val(opt.value).text(opt.label).appendTo(typeSelect); });
+
+    var rowInterval = $('<div class="form-row kufayeka-inject-time-row hidden"></div>').appendTo(container);
+    $('<span>every </span>').appendTo(rowInterval);
+    var intervalCount = $('<input class="kufayeka-inject-time-count" value="1" style="width: 80px; display: inline-block;">').appendTo(rowInterval);
+    var intervalUnits = $('<select style="width: 100px; display: inline-block; margin-left: 6px;"></select>').appendTo(rowInterval);
+    [["s", "seconds"], ["m", "minutes"], ["h", "hours"]].forEach(function (u) { $("<option>").val(u[0]).text(u[1]).appendTo(intervalUnits); });
+
+    var rowIntervalTime = $('<div class="form-row kufayeka-inject-time-row hidden"></div>').appendTo(container);
+    $('<span>every </span>').appendTo(rowIntervalTime);
+    var intUnits = $('<select style="width: 90px; margin-left: 8px; margin-right: 6px;" class="inject-time-int-count"></select>').appendTo(rowIntervalTime);
+    ["1", "2", "3", "4", "5", "6", "10", "12", "15", "20", "30", "0"].forEach(function (m) {
+        $("<option>").val(m).text(m === "0" ? "60" : m).appendTo(intUnits);
+    });
+    $('<span>minutes</span><br>').appendTo(rowIntervalTime);
+    $('<span>between </span>').appendTo(rowIntervalTime);
+    var intervalTimeStart = $('<select class="kufayeka-inject-time-times" style="margin-left: 4px; margin-right: 8px;"></select>').appendTo(rowIntervalTime);
+    $('<span>and </span>').appendTo(rowIntervalTime);
+    var intervalTimeEnd = $('<select class="kufayeka-inject-time-times" style="margin-left: 4px;"></select><br>').appendTo(rowIntervalTime);
+
+    var dayNames = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    function buildDayPicker(parent) {
+        var wrap = $('<div class="kufayeka-inject-time-days" style="margin-top: 6px;"></div>').appendTo(parent);
+        $('<div style="display:inline-block; vertical-align:top; margin-right:8px;">on</div>').appendTo(wrap);
+        var grid = $('<div style="display:inline-block;"></div>').appendTo(wrap);
+        var r1 = $('<div></div>').appendTo(grid);
+        var r2 = $('<div></div>').appendTo(grid);
+        var r3 = $('<div></div>').appendTo(grid);
+        [0, 1, 2].forEach(function (i) { $('<label><input type="checkbox" checked value="' + (i + 1) + '"> ' + dayNames[i] + '</label>').appendTo(r1); });
+        [3, 4, 5].forEach(function (i) { $('<label><input type="checkbox" checked value="' + (i + 1) + '"> ' + dayNames[i] + '</label>').appendTo(r2); });
+        $('<label><input type="checkbox" checked value="0"> ' + dayNames[6] + '</label>').appendTo(r3);
+        return wrap;
+    }
+    var daysIntervalTime = buildDayPicker(rowIntervalTime);
+
+    var rowTime = $('<div class="form-row kufayeka-inject-time-row hidden"></div>').appendTo(container);
+    $('<span>at </span>').appendTo(rowTime);
+    var timeInput = $('<input type="text" value="12:00" style="width:75px; margin-left:8px; margin-bottom:8px;"><br>').appendTo(rowTime);
+    var daysTime = buildDayPicker(rowTime);
+
+    var allRows = rowInterval.add(rowIntervalTime).add(rowTime);
+    $([intervalTimeStart[0], intervalTimeEnd[0]]).each(function () {
+        for (var i = 0; i < 24; i++) {
+            var l = (i < 10 ? "0" : "") + i + ":00";
+            $(this).append($("<option></option>").val(i).text(l));
+        }
+    });
+    $("<option></option>").val(24).text("00:00").appendTo(intervalTimeEnd);
+    intervalTimeStart.on("change", function () {
+        var start = Number(intervalTimeStart.val());
+        var end = Number(intervalTimeEnd.val());
+        intervalTimeEnd.empty();
+        for (var i = start + 1; i < 25; i++) {
+            var l = (i < 10 ? "0" : "") + i + ":00";
+            if (i === 24) l = "00:00";
+            var opt = $("<option></option>").val(i).text(l).appendTo(intervalTimeEnd);
+            if (i === end) opt.attr("selected", "selected");
+        }
+        emitChange();
+    });
+    container.find(".kufayeka-inject-time-count").spinner({
+        min: 1,
+        change: function () { emitChange(); },
+        stop: function () { emitChange(); },
+        spin: function () { setTimeout(emitChange, 10); }
+    });
+
+    function showRowFor(type) {
+        allRows.hide();
+        if (type === "interval") rowInterval.show();
+        else if (type === "interval-time") rowIntervalTime.show();
+        else if (type === "time") rowTime.show();
+    }
+
+    function emitChange() {
+        var repeat = "";
+        var crontab = "";
+        var type = typeSelect.val();
+        if (type === "interval") {
+            var count = Number(intervalCount.val()) || 1;
+            var units = intervalUnits.val();
+            repeat = units === "h" ? count * 3600 : (units === "m" ? count * 60 : count);
+        } else if (type === "interval-time") {
+            var count2 = intUnits.val();
+            var startTime = Number(intervalTimeStart.val());
+            var endTime = Number(intervalTimeEnd.val());
+            var days = rowIntervalTime.find('input[type=checkbox]:checked').map(function (_, el) { return $(el).val(); }).get();
+            if (days.length > 0) {
+                days = days.length === 7 ? "*" : days.join(",");
+                var timerange;
+                if (endTime === 0 || endTime === 24) timerange = startTime === 0 ? "0-23" : startTime + "-23";
+                else if (startTime + 1 < endTime) timerange = startTime + "-" + (endTime - 1);
+                else if (startTime + 1 === endTime) timerange = String(startTime);
+                else {
+                    var sp = (startTime === 23) ? "23" : startTime + "-23";
+                    var ep = (endTime === 1) ? "0" : "0-" + (endTime - 1);
+                    timerange = sp + "," + ep;
+                }
+                crontab = (count2 === "0" ? "0 " : "*/" + count2 + " ") + timerange + " * * " + days;
+            }
+        } else if (type === "time") {
+            var time = timeInput.val() || "12:00";
+            var days2 = rowTime.find('input[type=checkbox]:checked').map(function (_, el) { return $(el).val(); }).get();
+            if (days2.length > 0) {
+                days2 = days2.length === 7 ? "*" : days2.join(",");
+                var parts = time.split(":");
+                if (parts.length === 2) {
+                    var min = ("00" + (parseInt(parts[1], 10) % 60)).substr(-2);
+                    var hour = ("00" + (parseInt(parts[0], 10) % 24)).substr(-2);
+                    crontab = parseInt(min, 10) + " " + parseInt(hour, 10) + " * * " + days2;
+                }
+            }
+        }
+
+        node.repeat = repeat;
+        node.crontab = crontab;
+        node.once = onceCheckbox.prop("checked");
+        node.onceDelay = Number(onceDelayInput.val()) || 0.1;
+        node.dirty = true;
+        if (RED.nodes && RED.nodes.dirty) {
+            RED.nodes.dirty(true);
+        }
+        if (onChange) onChange();
+    }
+
+    typeSelect.on("change input", function () { showRowFor($(this).val()); emitChange(); });
+    [intervalCount, intervalUnits, intUnits, timeInput, onceDelayInput].forEach(function (el) {
+        el.on("change keyup input spinstop spinchange", emitChange);
+    });
+    container.find(".kufayeka-inject-time-days input[type=checkbox]").on("change input", emitChange);
+    rowIntervalTime.find("select, input").on("change input", emitChange);
+    rowTime.find("select, input").on("change input", emitChange);
+    onceCheckbox.on("change input", function () {
+        onceDelayInput.prop("disabled", !$(this).prop("checked"));
+        emitChange();
+    });
+    onceDelayInput.prop("disabled", !onceCheckbox.prop("checked"));
+
+    // Parse initial state
+    var repeattype = "none";
+    if (node.repeat && !node.crontab) {
+        repeattype = "interval";
+        var r = "s";
+        var c = node.repeat || 1;
+        if (c % 60 === 0) { r = "m"; c = c / 60; }
+        if (c % 60 === 0 && r === "m") { r = "h"; c = c / 60; }
+        intervalCount.val(c);
+        intervalUnits.val(r);
+    } else if (node.crontab) {
+        var cronparts = String(node.crontab).trim().split(" ");
+        if (cronparts.length >= 5) {
+            var cdays = cronparts[4];
+            if (!isNaN(cronparts[0]) && !isNaN(cronparts[1])) {
+                repeattype = "time";
+                var t = (cronparts[1].length === 1 ? "0" + cronparts[1] : cronparts[1]) + ":" + (cronparts[0].length === 1 ? "0" + cronparts[0] : cronparts[0]);
+                timeInput.val(t);
+                if (cdays === "*" || !cdays) rowTime.find('input[type=checkbox]').prop("checked", true);
+                else {
+                    rowTime.find('input[type=checkbox]').prop("checked", false);
+                    cdays.split(",").forEach(function (v) { rowTime.find('[value=' + v + ']').prop("checked", true); });
+                }
+            } else {
+                repeattype = "interval-time";
+                var minutes = cronparts[0].replace("*/", "");
+                if (minutes === "") minutes = "0";
+                intUnits.val(minutes);
+                if (cdays === "*" || !cdays) rowIntervalTime.find('input[type=checkbox]').prop("checked", true);
+                else {
+                    rowIntervalTime.find('input[type=checkbox]').prop("checked", false);
+                    cdays.split(",").forEach(function (v) { rowIntervalTime.find('[value=' + v + ']').prop("checked", true); });
+                }
+                var timeparts = cronparts[1].split(",");
+                var start = "0", end = "24";
+                if (timeparts.length === 1) {
+                    var hours = timeparts[0].split("-");
+                    if (hours.length === 1) {
+                        if (hours[0] === "") { start = "0"; end = "0"; } else { start = hours[0]; end = String(Number(hours[0]) + 1); }
+                    } else { start = hours[0]; end = String(Number(hours[1]) + 1); }
+                } else {
+                    var sp2 = timeparts[0].split("-");
+                    start = sp2[0];
+                    var ep2 = timeparts[1].split("-");
+                    end = ep2.length === 1 ? String(Number(ep2[0]) + 1) : String(Number(ep2[1]) + 1);
+                }
+                intervalTimeStart.val(start).trigger("change");
+                intervalTimeEnd.val(end);
+            }
+        }
+    }
+    typeSelect.val(repeattype);
+    showRowFor(repeattype);
+}
+
+window.KufayekaComponents = window.KufayekaComponents || {};
+window.KufayekaComponents.buildTriggerSchedulePicker = buildTriggerSchedulePicker;
+
+/**
+ * Calculation Script Modal Editor Tray Component.
+ * Supports Monaco/Ace editor, fullscreen expansion, trigger modes (onChange, watch, schedule),
+ * run policies, and contextual tips.
+ */
+
+function openAttributeScriptEditor(attr, onSaved) {
+    attr.script = attr.script || { enabled: false, code: "", trigger: { mode: "onChange", scheduleId: "", watch: [] } };
+    attr.script.trigger = attr.script.trigger || { mode: "onChange", scheduleId: "", watch: [] };
+    if (attr.script.trigger.triggerNodeId && !attr.script.trigger.scheduleId) {
+        attr.script.trigger.scheduleId = attr.script.trigger.triggerNodeId;
+    }
+
+    var codeEditor;
+
+    RED.tray.show({
+        title: "Calculation Script — " + (attr.name || "attribute"),
+        width: 750,
+        buttons: [
+            { id: "kufayeka-script-cancel", text: "Cancel", click: function () { RED.tray.close(); } },
+            {
+                id: "kufayeka-script-ok",
+                text: "Done",
+                class: "primary",
+                click: function () {
+                    var mode = $("#kufayeka-script-trigger-mode").val() || "onChange";
+                    var scheduleId = mode === "schedule" ? ($("#kufayeka-script-schedule-select").val() || "") : "";
+                    var runPolicy = mode === "schedule" ? ($("#kufayeka-script-run-policy-select").val() || "always") : "always";
+                    var watch = mode === "watch"
+                        ? ($("#kufayeka-script-watch-list").val() || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+                        : [];
+
+                    attr.script = {
+                        enabled: $("#kufayeka-script-enabled").prop("checked"),
+                        code: codeEditor.getValue(),
+                        trigger: {
+                            mode: mode,
+                            scheduleId: scheduleId,
+                            runPolicy: runPolicy,
+                            triggerNodeId: scheduleId, // for backwards compatibility
+                            watch: watch
+                        }
+                    };
+                    RED.tray.close();
+                    if (onSaved) onSaved();
+                }
+            }
+        ],
+        resize: function () {
+            if (codeEditor) codeEditor.resize();
+        },
+        open: function (tray) {
+            var content = tray.find(".red-ui-tray-body");
+            var form = $("<div>").css({ padding: "8px 4px" }).appendTo(content);
+
+            // ==========================================
+            // 1. MONACO / ACE CODE EDITOR (Function Node Style)
+            // ==========================================
+            var editorRow = $('<div class="form-row node-text-editor-row" style="position:relative; margin-bottom: 14px;"></div>').appendTo(form);
+            $('<div style="height: 240px; min-height: 160px;" class="node-text-editor" id="kufayeka-script-code-editor"></div>').appendTo(editorRow);
+
+            var expandWrap = $('<div style="position: absolute; right: 0; bottom: calc(100% - 20px); z-index: 10;"></div>').appendTo(editorRow);
+            var expandBtn = $('<button type="button" id="kufayeka-script-expand-js" class="red-ui-button red-ui-button-small"><i class="fa fa-expand"></i></button>').appendTo(expandWrap);
+            RED.popover.tooltip(expandBtn, RED._("node-red:common.label.expand") || "Expand");
+
+            codeEditor = RED.editor.createEditor({
+                id: "kufayeka-script-code-editor",
+                mode: "ace/mode/nrjavascript",
+                value: attr.script.code || "return self;",
+                globals: { self: true, current: true, prevSelf: true, setSibling: true, sibling: true, asset: true, $: true, Math: true }
+            });
+
+            expandBtn.on("click", function (e) {
+                e.preventDefault();
+                var value = codeEditor.getValue();
+                if (codeEditor.saveView) codeEditor.saveView();
+                RED.editor.editJavaScript({
+                    value: value,
+                    width: "Infinity",
+                    mode: "ace/mode/nrjavascript",
+                    focus: true,
+                    cancel: function () {
+                        setTimeout(function () { codeEditor.focus(); }, 250);
+                    },
+                    complete: function (v) {
+                        codeEditor.setValue(v, -1);
+                        setTimeout(function () {
+                            if (codeEditor.restoreView) codeEditor.restoreView();
+                            codeEditor.focus();
+                        }, 250);
+                    }
+                });
+            });
+
+            // ==========================================
+            // 2. ENABLE CALCULATION SCRIPT CHECKBOX
+            // ==========================================
+            var rowEnabled = $('<div class="form-row" id="kufayeka-script-enabled-row"></div>').appendTo(form);
+            $('<label for="kufayeka-script-enabled">&nbsp;</label>').appendTo(rowEnabled);
+            $('<input type="checkbox" id="kufayeka-script-enabled" style="display:inline-block; width:15px; vertical-align:baseline; margin:0 6px 0 0; cursor:pointer;">')
+                .prop("checked", attr.script.enabled === true)
+                .appendTo(rowEnabled);
+            $('<label for="kufayeka-script-enabled" style="width:auto; cursor:pointer; font-weight:600; display:inline-block; vertical-align:baseline;">Enable calculation script for this attribute</label>').appendTo(rowEnabled);
+
+            // ==========================================
+            // 3. TRIGGER MODE SELECTOR
+            // ==========================================
+            var rowTriggerMode = $('<div class="form-row" style="margin-bottom: 10px;"></div>').appendTo(form);
+            $('<label for="kufayeka-script-trigger-mode"><i class="fa fa-clock-o"></i> Trigger</label>').appendTo(rowTriggerMode);
+            var triggerModeSelect = $('<select id="kufayeka-script-trigger-mode" style="width: calc(100% - 110px);"></select>').appendTo(rowTriggerMode);
+            $('<option value="onChange">On Value Change (Instant calculation on write)</option>').appendTo(triggerModeSelect);
+            $('<option value="watch">Watch Attributes (Instant recalculation when ANY watched attribute changes)</option>').appendTo(triggerModeSelect);
+            $('<option value="schedule">Trigger Schedule (Execute on centralized schedule timer)</option>').appendTo(triggerModeSelect);
+
+            // ==========================================
+            // 3b. WATCH LIST (for "watch" trigger mode)
+            // ==========================================
+            var rowWatchList = $('<div class="form-row" id="kufayeka-script-watch-row" style="display:none; margin-bottom: 10px;"></div>').appendTo(form);
+            $('<label for="kufayeka-script-watch-list"><i class="fa fa-eye"></i> Watch</label>').appendTo(rowWatchList);
+            var watchListInput = $('<input type="text" id="kufayeka-script-watch-list" style="width: calc(100% - 110px);" placeholder="a, b  (or Plant1.Line1.Motor1.a for a different asset)">').appendTo(rowWatchList);
+            RED.popover.tooltip(watchListInput, "Comma-separated attribute names. Bare names (e.g. \"a\") watch a sibling on THIS asset; use a full path for a different asset.");
+
+            // ==========================================
+            // 4. CENTRALIZED TRIGGER SCHEDULE SELECTOR
+            // ==========================================
+            var rowScheduleSelect = $('<div class="form-row" id="kufayeka-script-schedule-row" style="display:none; margin-bottom: 10px;"></div>').appendTo(form);
+            $('<label for="kufayeka-script-schedule-select"><i class="fa fa-repeat"></i> Schedule</label>').appendTo(rowScheduleSelect);
+            var scheduleSelectWrap = $('<div style="display:inline-block; width: calc(100% - 110px);"></div>').appendTo(rowScheduleSelect);
+            var scheduleSelect = $('<select id="kufayeka-script-schedule-select" style="width: calc(100% - 70px); vertical-align: middle;"></select>').appendTo(scheduleSelectWrap);
+            var addScheduleBtn = $('<button type="button" class="red-ui-button" style="margin-left: 5px; vertical-align: middle;"><i class="fa fa-plus"></i></button>').appendTo(scheduleSelectWrap);
+            RED.popover.tooltip(addScheduleBtn, "Add a new Trigger Schedule config node");
+
+            var rowRunPolicy = $('<div class="form-row" id="kufayeka-script-run-policy-row" style="display:none; margin-bottom: 10px;"></div>').appendTo(form);
+            $('<label for="kufayeka-script-run-policy-select"><i class="fa fa-play-circle-o"></i> Execution</label>').appendTo(rowRunPolicy);
+            var runPolicySelect = $('<select id="kufayeka-script-run-policy-select" style="width: calc(100% - 110px);"></select>').appendTo(rowRunPolicy);
+            $('<option value="always">Always run on schedule (Continuous — fires every tick even without new write)</option>').appendTo(runPolicySelect);
+            $('<option value="onlyOnWrite">Only run if new write arrives (Waits for incoming write before executing)</option>').appendTo(runPolicySelect);
+
+            function refreshScheduleOptions(selectedId) {
+                scheduleSelect.empty();
+                var count = 0;
+                var seen = {};
+                function addOption(cn) {
+                    if (cn && cn.type === "kufayeka-trigger-schedule" && !seen[cn.id]) {
+                        seen[cn.id] = true;
+                        count++;
+                        var label = cn.name || ("Schedule (" + (cn.repeat ? "every " + cn.repeat + "s" : cn.crontab || cn.id) + ")");
+                        var opt = $('<option>').val(cn.id).text(label).appendTo(scheduleSelect);
+                        if (cn.id === selectedId) opt.prop("selected", true);
+                    }
+                }
+                if (RED.nodes.eachConfig) {
+                    RED.nodes.eachConfig(addOption);
+                }
+                if (RED.nodes.eachNode) {
+                    RED.nodes.eachNode(addOption);
+                }
+                if (RED.nodes.filterNodes) {
+                    var filtered = RED.nodes.filterNodes({ type: "kufayeka-trigger-schedule" });
+                    if (Array.isArray(filtered)) {
+                        filtered.forEach(addOption);
+                    }
+                }
+                if (selectedId && !seen[selectedId] && RED.nodes.node) {
+                    var directNode = RED.nodes.node(selectedId);
+                    if (directNode && directNode.type === "kufayeka-trigger-schedule") {
+                        addOption(directNode);
+                    }
+                }
+                if (count === 0) {
+                    $('<option value="">(none yet — click + to add one)</option>').appendTo(scheduleSelect);
+                } else if (selectedId) {
+                    scheduleSelect.val(selectedId);
+                }
+            }
+
+            var onNodeAdd = function (node) {
+                if (node && node.type === "kufayeka-trigger-schedule") {
+                    refreshScheduleOptions(node.id);
+                }
+            };
+            var onNodeChange = function (node) {
+                if (node && node.type === "kufayeka-trigger-schedule") {
+                    refreshScheduleOptions(scheduleSelect.val());
+                }
+            };
+            if (RED.events && RED.events.on) {
+                RED.events.on("nodes:add", onNodeAdd);
+                RED.events.on("nodes:change", onNodeChange);
+            }
+
+            addScheduleBtn.on("click", function (evt) {
+                evt.preventDefault();
+                RED.editor.editConfig("", "kufayeka-trigger-schedule", "_ADD_");
+            });
+
+            var currentMode = "onChange";
+            if (attr.script.trigger) {
+                if (["schedule", "sharedTrigger", "interval", "crontab"].indexOf(attr.script.trigger.mode) !== -1) currentMode = "schedule";
+                else if (attr.script.trigger.mode === "watch") currentMode = "watch";
+            }
+            var initialScheduleId = (attr.script.trigger && (attr.script.trigger.scheduleId || attr.script.trigger.triggerNodeId)) || "";
+            var initialRunPolicy = (attr.script.trigger && attr.script.trigger.runPolicy) || "always";
+            var initialWatchList = (attr.script.trigger && Array.isArray(attr.script.trigger.watch)) ? attr.script.trigger.watch.join(", ") : "";
+
+            triggerModeSelect.val(currentMode);
+            runPolicySelect.val(initialRunPolicy);
+            watchListInput.val(initialWatchList);
+            refreshScheduleOptions(initialScheduleId);
+
+            function updateModeVisibility() {
+                var mode = triggerModeSelect.val();
+                rowScheduleSelect.toggle(mode === "schedule");
+                rowRunPolicy.toggle(mode === "schedule");
+                rowWatchList.toggle(mode === "watch");
+            }
+
+            triggerModeSelect.on("change", updateModeVisibility);
+            updateModeVisibility();
+
+            // ==========================================
+            // 5. CHEAT SHEET & TIP CALLOUT
+            // ==========================================
+            var tipsBox = $('<div style="margin-top: 18px; padding: 10px 14px; border-radius: 4px; border: 1px solid var(--red-ui-secondary-border-color, #e2e8f0); background: var(--red-ui-tertiary-background, #f8fafc); font-size: 11px; line-height: 1.6; color: var(--red-ui-secondary-text-color, #64748b);"></div>').appendTo(form);
+            $('<div><strong style="color:var(--red-ui-primary-text-color, #1e293b);"><i class="fa fa-info-circle"></i> Execution Behavior & Context Cheat Sheet:</strong></div>').appendTo(tipsBox);
+            $('<div>&bull; <strong>On Value Change</strong>: Calculation executes immediately on incoming writes and returns the final value.</div>').appendTo(tipsBox);
+            $('<div>&bull; <strong>Watch Attributes</strong>: Recalculates immediately the instant ANY attribute in the Watch list changes — no direct write to this attribute needed. Use this for derived/formula attributes (e.g. <code>result = a * b</code>) instead of a Trigger Schedule, so the result is never stale between poll ticks.</div>').appendTo(tipsBox);
+            $('<div>&bull; <strong>Trigger Schedule</strong>: Incoming writes are staged (as <code>self</code>); the calculation executes and commits when the selected centralized schedule timer fires.</div>').appendTo(tipsBox);
+            $('<div>&bull; Script must <code>return</code> the final computed value. Available variables:</div>').appendTo(tipsBox);
+            $('<div style="padding-left: 10px;">- <code>self</code>: Current incoming/staged raw value.<br>- <code>current</code>: This attribute\'s existing stored value before this calculation.<br>- <code>prevSelf</code>: Previous <code>self</code> raw value seen by this attribute (useful for delta/counter rate calculations).<br>- <em>Sibling attributes</em>: Direct read & write to other attributes on the same asset (e.g. <code>status = "ALARM";</code> or <code>setSibling("status", "ALARM")</code> or <code>sibling.status = "ALARM"</code>).<br>- <em>Cross-asset paths</em>: Full path read/write starting with <code>%</code> (e.g. <code>%Plant1.Line1.Motor1.power = 100</code>) or <code>asset.set(...)</code>.</div>').appendTo(tipsBox);
+        },
+        close: function () {
+            if (codeEditor) codeEditor.destroy();
+            if (RED.events && RED.events.off) {
+                RED.events.off("nodes:add", onNodeAdd);
+                RED.events.off("nodes:change", onNodeChange);
+            }
+        }
+    });
+}
+
+window.KufayekaComponents = window.KufayekaComponents || {};
+window.KufayekaComponents.openAttributeScriptEditor = openAttributeScriptEditor;
+
+    // ==========================================
+    // 4. SIDEBAR TABS
+    // ==========================================
+/**
+ * Asset Manager Sidebar Tab for Node-RED.
+ * Provides hierarchical asset treeList, per-asset live watch toggle, asset detail panel,
+ * template assignment, and effective attributes table with live values and instant apply.
+ */
+
+var KufayekaAssetManagerTab = (function () {
+    var tree;
+    var assetDetailPane;
+    var tableBody;
+    var currentAssetId = null;
+    var liveWatchStatus = null;
+    var treeContainerEl = null;
+    var lastTreeNodes = [];
+    var watchedAssetIds = new Set();
+    var expandedAssetIds = new Set();
+
+    function getStore() {
+        return window.KufayekaSchemaStore;
+    }
+
+    function init() {
+        if (RED.sidebar.containsTab && RED.sidebar.containsTab("kufayeka-asset-manager")) return;
+
+        var content = $("<div>").css({ position: "relative", height: "100%", width: "100%" });
+
+        // Outer scroll wrapper to allow horizontal & vertical overflow
+        var stack = $("<div>", { class: "red-ui-sidebar-context-stack" })
+            .css({
+                display: "flex",
+                "flex-direction": "column",
+                height: "100%",
+                width: "100%",
+                "overflow-x": "auto",
+                "overflow-y": "auto"
+            })
+            .appendTo(content);
+
+        // 2-Column Full Height Master-Detail Row
+        var mainRow = $("<div>")
+            .css({
+                display: "flex",
+                "flex-direction": "row",
+                height: "100%",
+                width: "100%",
+                "min-width": "1080px",
+                "min-height": "100%"
+            })
+            .appendTo(stack);
+
+        // Column 1 (Left - Full Height Asset Tree List)
+        var treeColumn = $("<div>").css({
+            flex: "0 0 260px",
+            "min-width": "230px",
+            "max-width": "320px",
+            display: "flex",
+            "flex-direction": "column",
+            height: "100%",
+            "border-right": "1px solid var(--red-ui-secondary-border-color, #e0e0e0)",
+            background: "var(--red-ui-secondary-background, #fafafa)"
+        }).appendTo(mainRow);
+
+        var treeToolbar = $("<div>").css({
+            display: "flex",
+            gap: "4px",
+            padding: "8px 6px",
+            "flex-shrink": "0",
+            "border-bottom": "1px solid var(--red-ui-secondary-border-color, #f0f0f0)"
+        }).appendTo(treeColumn);
+
+        $('<button class="red-ui-button red-ui-button-small">Add Root</button>').appendTo(treeToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            addAsset(null);
+        });
+        $('<button class="red-ui-button red-ui-button-small">Add Child</button>').appendTo(treeToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            if (!currentAssetId) {
+                RED.notify("Select an asset first", "warning");
+                return;
+            }
+            addAsset(currentAssetId);
+        });
+        $('<button class="red-ui-button red-ui-button-small">Delete</button>').appendTo(treeToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            removeAsset(currentAssetId);
+        });
+        var treeRefreshButton = $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-refresh"></i></button>').appendTo(treeToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            load();
+        });
+        RED.popover.tooltip(treeRefreshButton, "Refresh assets and attributes");
+
+        var expandAllButton = $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-plus-square-o"></i></button>').appendTo(treeToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            var globalSection = getStore().getGlobalSection();
+            (globalSection && globalSection.assets ? globalSection.assets : []).forEach(function (a) {
+                if (hasChildren(a.id)) expandedAssetIds.add(a.id);
+            });
+            refreshTree();
+        });
+        RED.popover.tooltip(expandAllButton, "Expand all");
+
+        var collapseAllButton = $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-minus-square-o"></i></button>').appendTo(treeToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            expandedAssetIds.clear();
+            refreshTree();
+        });
+        RED.popover.tooltip(collapseAllButton, "Collapse all");
+
+        var treeContainer = $("<div>").css({
+            flex: "1 1 auto",
+            "min-height": "0",
+            "overflow-y": "auto",
+            padding: "6px 4px"
+        }).appendTo(treeColumn);
+        treeContainerEl = treeContainer;
+
+        tree = $("<div>").css({ width: "100%", height: "100%" }).appendTo(treeContainer).treeList({ data: [] });
+        tree.on("treelistselect", function (evt, item) {
+            if (!item || !item.assetId) return;
+            selectAsset(item.assetId);
+        });
+
+        // Capture phase for treeList expansion
+        treeContainer[0].addEventListener("click", function () {
+            setTimeout(function () { syncExpandedStateFromTree(lastTreeNodes); }, 0);
+        }, true);
+
+        // Column 2 (Right - 2 Rows Stacked Vertically)
+        var rightCol = $("<div>").css({
+            flex: "1 1 auto",
+            display: "flex",
+            "flex-direction": "column",
+            height: "100%",
+            "min-width": "780px",
+            "overflow-y": "auto"
+        }).appendTo(mainRow);
+
+        // Row 1: Asset Detail Form
+        var detailContainer = $("<div>")
+            .css({
+                flex: "0 0 auto",
+                padding: "12px 16px 8px 16px",
+                "border-bottom": "1px solid var(--red-ui-secondary-border-color, #e0e0e0)"
+            })
+            .appendTo(rightCol);
+        assetDetailPane = $("<div>").appendTo(detailContainer);
+
+        // Row 2: Effective Attributes Table Section
+        var tableSection = $("<div>").css({
+            flex: "1 1 auto",
+            display: "flex",
+            "flex-direction": "column",
+            padding: "8px 14px"
+        }).appendTo(rightCol);
+
+        var tableToolbar = $("<div>").css({
+            display: "flex",
+            "justify-content": "space-between",
+            "align-items": "center",
+            padding: "4px 0 8px 0",
+            "flex-shrink": "0"
+        }).appendTo(tableSection);
+
+        var leftTableToolbar = $("<div>").css({ display: "flex", "align-items": "center", gap: "8px" }).appendTo(tableToolbar);
+        $("<span style='font-size:11px; font-weight:bold; text-transform:uppercase; color:var(--red-ui-secondary-text-color, #666);'>Effective Attributes</span>").appendTo(leftTableToolbar);
+
+        var rightTableToolbar = $("<div>").css({ display: "flex", "align-items": "center", gap: "6px" }).appendTo(tableToolbar);
+
+        liveWatchStatus = $('<span style="font-weight:500;"></span>').appendTo(rightTableToolbar);
+        RED.popover.tooltip(liveWatchStatus, "Live watch is toggled per-asset from the eye icon on each row in the tree — click it to start/stop live updates for just that asset's attributes.");
+        updateLiveWatchStatus();
+
+        var tableContainer = $("<div>").css({ flex: "1 1 auto" }).appendTo(tableSection);
+        var table = $('<table class="kufayeka-asset-table"></table>').appendTo(tableContainer);
+        var headRow = $("<tr>").appendTo($("<thead>").appendTo(table));
+        [
+            { name: "Name", width: "140px" },
+            { name: "Description", width: "180px" },
+            { name: "Value (TypedInput)", width: "200px" },
+            { name: "Action", width: "90px" },
+            { name: "Unit", width: "80px" },
+            { name: "Updated", width: "110px" },
+            { name: "Historian", width: "100px" }
+        ].forEach(function (col) {
+            $("<th>").text(col.name).css({ "width": col.width }).appendTo(headRow);
+        });
+        tableBody = $("<tbody>").appendTo(table);
+
+        var footerToolbar = $("<div></div>");
+        var refreshButton = $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-refresh"></i> Refresh</button>')
+            .appendTo(footerToolbar)
+            .on("click", function (evt) {
+                evt.preventDefault();
+                load();
+            });
+
+        RED.sidebar.addTab({
+            id: "kufayeka-asset-manager",
+            label: "Asset Manager",
+            name: "Asset Manager",
+            iconClass: "fa fa-cubes",
+            content: content,
+            toolbar: footerToolbar,
+            enableOnEdit: true,
+            onchange: function () {
+                load();
+            }
+        });
+
+        if (RED.events && RED.events.on) {
+            RED.events.on("workspace:load", function () {
+                load();
+            });
+        }
+
+        load();
+
+        if (RED.comms && RED.comms.subscribe) {
+            RED.comms.subscribe("assets/changed", function (topic, meta) {
+                applyLiveChanges(meta);
+            });
+        }
+    }
+
+    function updateLiveWatchStatus() {
+        if (!liveWatchStatus) return;
+        if (!currentAssetId) {
+            liveWatchStatus.text("");
+            return;
+        }
+        var watched = watchedAssetIds.has(currentAssetId);
+        liveWatchStatus
+            .css({ color: watched ? "#065f46" : "#94a3b8" })
+            .html('<span class="kufayeka-pulse-dot ' + (watched ? "kufayeka-pulse-live" : "") + '" style="' + (watched ? "" : "background-color:#94a3b8;") + '"></span> Live Watch: ' + (watched ? "ON" : "OFF"));
+    }
+
+    function applyLiveChanges(meta) {
+        if (!currentAssetId || !watchedAssetIds.has(currentAssetId)) return;
+        var changes = (meta && meta.change && meta.change.changes) || [];
+        if (!changes.length) return;
+
+        changes.forEach(function (change) {
+            if (!change || change.kind !== "attribute" || change.assetId !== currentAssetId) return;
+
+            var row = tableBody.find("tr[data-attr-name='" + change.attributeName + "']");
+            if (!row.length) return;
+
+            var activeInput = row.find(":focus");
+            if (!activeInput.length) {
+                var valInput = row.find(".kufayeka-attr-val-input");
+                var currentVal = change.value !== undefined && change.value !== null ? (typeof change.value === "object" ? JSON.stringify(change.value) : String(change.value)) : "";
+                if (valInput.length && valInput.typedInput) {
+                    valInput.typedInput("value", currentVal);
+                }
+            }
+
+            var tsCell = row.find(".kufayeka-attr-ts");
+            if (tsCell.length) {
+                tsCell.text(change.ts ? new Date(change.ts).toLocaleTimeString() : "-");
+            }
+
+            row.css("background-color", "rgba(16, 185, 129, 0.14)");
+            setTimeout(function () {
+                row.css("background-color", "");
+            }, 600);
+        });
+    }
+
+    function load() {
+        $.getJSON("api/assets/system", function (resp) {
+            getStore().setGlobalSection(resp.data || resp);
+            $.getJSON("api/assets/hierarchy?populated=true", function (hResp) {
+                var hData = {};
+                indexHierarchy(hResp.data || hResp, hData);
+                getStore().setGlobalHierarchyById(hData);
+                refreshTree();
+                if (currentAssetId && findAsset(currentAssetId)) {
+                    selectAsset(currentAssetId);
+                } else {
+                    selectAsset(null);
+                }
+            });
+        }).fail(function () {
+            $.getJSON("assets/system", function (resp) {
+                getStore().setGlobalSection(resp.data || resp);
+                $.getJSON("assets/hierarchy?populated=true", function (hResp) {
+                    var hData = {};
+                    indexHierarchy(hResp.data || hResp, hData);
+                    getStore().setGlobalHierarchyById(hData);
+                    refreshTree();
+                    if (currentAssetId && findAsset(currentAssetId)) {
+                        selectAsset(currentAssetId);
+                    } else {
+                        selectAsset(null);
+                    }
+                });
+            });
+        });
+    }
+
+    function indexHierarchy(nodes, targetMap) {
+        (nodes || []).forEach(function (node) {
+            targetMap[node.id] = node;
+            indexHierarchy(node.children, targetMap);
+        });
+    }
+
+    function findAsset(id) {
+        var globalSection = getStore().getGlobalSection();
+        if (!globalSection || !globalSection.assets) return null;
+        return globalSection.assets.find(function (a) { return a.id === id; });
+    }
+
+    function hasChildren(assetId) {
+        var globalSection = getStore().getGlobalSection();
+        return (globalSection && globalSection.assets ? globalSection.assets : []).some(function (a) { return a.parentId === assetId; });
+    }
+
+    function syncExpandedStateFromTree(nodes) {
+        (nodes || []).forEach(function (node) {
+            if (node.children) {
+                if (node.expanded) expandedAssetIds.add(node.assetId);
+                else expandedAssetIds.delete(node.assetId);
+                syncExpandedStateFromTree(node.children);
+            }
+        });
+    }
+
+    function injectTreeWatchButtons(nodes) {
+        (nodes || []).forEach(function (node) {
+            if (node.treeList && node.treeList.label) {
+                var watched = watchedAssetIds.has(node.assetId);
+                var btn = $('<span class="kufayeka-tree-watch-btn"><i class="fa ' + (watched ? "fa-eye" : "fa-eye-slash") + '"></i></span>')
+                    .css({
+                        float: "right",
+                        marginRight: "4px",
+                        cursor: "pointer",
+                        opacity: watched ? 1 : 0.35,
+                        color: watched ? "#059669" : "inherit"
+                    })
+                    .appendTo(node.treeList.label);
+                RED.popover.tooltip(btn, "Toggle live watch for this asset");
+                btn.on("click", function (evt) {
+                    evt.preventDefault();
+                    evt.stopPropagation();
+                    var nowWatched = !watchedAssetIds.has(node.assetId);
+                    if (nowWatched) watchedAssetIds.add(node.assetId);
+                    else watchedAssetIds.delete(node.assetId);
+                    btn.find("i").attr("class", "fa " + (nowWatched ? "fa-eye" : "fa-eye-slash"));
+                    btn.css({ opacity: nowWatched ? 1 : 0.35, color: nowWatched ? "#059669" : "inherit" });
+                    if (node.assetId === currentAssetId) updateLiveWatchStatus();
+                });
+            }
+            if (node.children) injectTreeWatchButtons(node.children);
+        });
+    }
+
+    function refreshTree() {
+        var globalSection = getStore().getGlobalSection();
+        if (!globalSection || !globalSection.assets) {
+            tree.treeList("data", []);
+            lastTreeNodes = [];
+            return;
+        }
+        var byParent = {};
+        globalSection.assets.forEach(function (a) {
+            var p = a.parentId || "__root__";
+            byParent[p] = byParent[p] || [];
+            byParent[p].push(a);
+        });
+        function buildBranch(parentId) {
+            return (byParent[parentId] || []).map(function (a) {
+                var children = buildBranch(a.id);
+                var node = {
+                    id: a.id,
+                    assetId: a.id,
+                    label: a.name || "(unnamed)",
+                    icon: "fa fa-cube",
+                    selected: a.id === currentAssetId
+                };
+                if (children.length > 0) {
+                    node.children = children;
+                    node.expanded = expandedAssetIds.has(a.id);
+                }
+                return node;
+            });
+        }
+        lastTreeNodes = buildBranch("__root__");
+        tree.treeList("data", lastTreeNodes);
+        setTimeout(function () { injectTreeWatchButtons(lastTreeNodes); }, 0);
+    }
+
+    function selectAsset(assetId) {
+        currentAssetId = assetId;
+        renderAssetDetail();
+        renderAttributeTable();
+        updateLiveWatchStatus();
+    }
+
+    function renderAssetDetail() {
+        assetDetailPane.empty();
+        if (!currentAssetId) {
+            $("<div>").css({ padding: "12px", color: "var(--red-ui-secondary-text-color, #888)" }).text("Select an asset to view details").appendTo(assetDetailPane);
+            return;
+        }
+        var asset = findAsset(currentAssetId);
+        if (!asset) return;
+
+        var globalSection = getStore().getGlobalSection();
+        var sanitize = (window.KufayekaUtils && window.KufayekaUtils.sanitizeIdentifier) || function (s) { return String(s || "").replace(/\s+/g, "_"); };
+        var form = $("<div>").appendTo(assetDetailPane);
+
+        // Asset Name
+        var rowName = $('<div class="form-row" style="margin-bottom:8px"></div>').appendTo(form);
+        $("<label style='font-size:11px; font-weight:bold; display:block; margin-bottom:2px;'>Asset Name</label>").appendTo(rowName);
+        var nameInput = $('<input type="text" class="red-ui-input" style="width:100%">').val(asset.name || "").appendTo(rowName);
+        nameInput.on("input", function () {
+            var val = $(this).val();
+            var sanitized = sanitize(val);
+            if (val !== sanitized) {
+                var pos = this.selectionStart;
+                $(this).val(sanitized);
+                if (this.setSelectionRange && pos !== null) {
+                    this.setSelectionRange(pos, pos);
+                }
+            }
+            asset.name = sanitized;
+        });
+        nameInput.on("change", function () {
+            var sanitized = sanitize($(this).val());
+            $(this).val(sanitized);
+            asset.name = sanitized;
+            saveSchema(function () {
+                refreshTree();
+                selectAsset(currentAssetId);
+            });
+        });
+
+        // Parent Asset
+        var rowParent = $('<div class="form-row" style="margin-bottom:8px"></div>').appendTo(form);
+        $("<label style='font-size:11px; font-weight:bold; display:block; margin-bottom:2px;'>Parent Asset</label>").appendTo(rowParent);
+        var parentInput = $('<input type="text" style="width:100%">').appendTo(rowParent);
+        var parentOptions = [{ value: "", label: "(None - Root Level)" }];
+        (globalSection.assets || []).forEach(function (other) {
+            if (other.id !== asset.id) {
+                parentOptions.push({ value: other.id, label: other.name || other.id });
+            }
+        });
+        parentInput.typedInput({
+            types: [
+                {
+                    value: "parent",
+                    icon: "fa fa-sitemap",
+                    options: parentOptions
+                }
+            ]
+        });
+        parentInput.typedInput("value", asset.parentId || "");
+        parentInput.on("change", function () {
+            var newParent = parentInput.typedInput("value") || null;
+            if (newParent !== asset.parentId) {
+                asset.parentId = newParent;
+                saveSchema(function () { refreshTree(); selectAsset(currentAssetId); });
+            }
+        });
+
+        // Templates Assignment
+        var rowTpl = $('<div class="form-row" style="margin-bottom:8px"></div>').appendTo(form);
+        $("<label style='font-size:11px; font-weight:bold; display:block; margin-bottom:2px;'>Assigned Templates</label>").appendTo(rowTpl);
+
+        var tplInput = $('<input type="text" style="width:100%">').appendTo(rowTpl);
+        var allTemplates = (globalSection.attributeTemplates || []).map(function (t) {
+            return { value: t.id, label: t.name || t.id };
+        });
+
+        if (allTemplates.length === 0) {
+            allTemplates.push({ value: "__none__", label: "(No templates defined in system)" });
+        }
+
+        tplInput.typedInput({
+            types: [
+                {
+                    value: "templates",
+                    icon: "fa fa-puzzle-piece",
+                    multiple: true,
+                    options: allTemplates,
+                    valueLabel: function (container, selection) {
+                        if (!selection || selection.length === 0) {
+                            container.text("(0 selected - click to select)");
+                        } else {
+                            var names = selection.map(function (item) {
+                                if (typeof item === "object" && item) return item.label || item.value;
+                                var found = (globalSection.attributeTemplates || []).find(function (t) { return t.id === item; });
+                                return found ? found.name : item;
+                            });
+                            container.text(names.join(", "));
+                        }
+                    }
+                }
+            ]
+        });
+
+        var initialSelected = (asset.templateIds || []).filter(Boolean);
+        tplInput.typedInput("value", initialSelected.join(","));
+
+        tplInput.on("change", function () {
+            var raw = tplInput.typedInput("value");
+            var chosenIds = [];
+            if (Array.isArray(raw)) {
+                chosenIds = raw.filter(function (id) { return id && id !== "__none__"; });
+            } else if (typeof raw === "string" && raw.length > 0) {
+                chosenIds = raw.split(",").map(function (s) { return s.trim(); }).filter(function (id) { return id && id !== "__none__"; });
+            }
+
+            var current = (asset.templateIds || []).slice().sort().join(",");
+            var updated = chosenIds.slice().sort().join(",");
+            if (current !== updated) {
+                asset.templateIds = chosenIds;
+                saveSchema(function () {
+                    refreshTree();
+                    selectAsset(currentAssetId);
+                });
+            }
+        });
+
+        // Quick Badges
+        if (asset.templateIds && asset.templateIds.length > 0) {
+            var badgeContainer = $("<div>").css({
+                display: "flex",
+                "flex-wrap": "wrap",
+                gap: "4px",
+                "margin-top": "5px"
+            }).appendTo(rowTpl);
+
+            asset.templateIds.forEach(function (tplId) {
+                var tpl = (globalSection.attributeTemplates || []).find(function (t) { return t.id === tplId; });
+                var badge = $("<span>").css({
+                    display: "inline-flex",
+                    "align-items": "center",
+                    background: "var(--red-ui-view-grid-color, #e0f2fe)",
+                    color: "var(--red-ui-text-color-link, #0369a1)",
+                    "font-size": "10px",
+                    padding: "2px 8px",
+                    "border-radius": "10px",
+                    "font-weight": "bold",
+                    border: "1px solid #bae6fd"
+                }).appendTo(badgeContainer);
+                $("<span>").text((tpl ? tpl.name : tplId) + " ").appendTo(badge);
+                $('<i class="fa fa-times" style="margin-left:4px; cursor:pointer; opacity:0.7"></i>')
+                    .appendTo(badge)
+                    .on("click", function (e) {
+                        e.stopPropagation();
+                        asset.templateIds = asset.templateIds.filter(function (id) { return id !== tplId; });
+                        saveSchema(function () { refreshTree(); selectAsset(currentAssetId); });
+                    });
+            });
+        }
+    }
+
+    function renderAttributeTable() {
+        tableBody.empty();
+        if (!currentAssetId) return;
+
+        var globalHierarchyById = getStore().getGlobalHierarchyById();
+        var globalSection = getStore().getGlobalSection();
+        var hNode = globalHierarchyById[currentAssetId];
+        if (!hNode || !hNode.effectiveAttributes || hNode.effectiveAttributes.length === 0) {
+            $('<tr><td colspan="7" style="text-align:center; color:var(--red-ui-secondary-text-color, #888); padding:20px;">No effective attributes defined for this asset</td></tr>').appendTo(tableBody);
+            return;
+        }
+
+        var asset = findAsset(currentAssetId);
+        var templateIds = (asset && asset.templateIds) || hNode.templateIds || [];
+        var allTemplates = (globalSection && globalSection.attributeTemplates) ? globalSection.attributeTemplates : [];
+        var assetPath = hNode.path || hNode.name;
+
+        var groups = {};
+        var groupOrder = [];
+
+        hNode.effectiveAttributes.forEach(function (attr) {
+            var matchedTpl = null;
+            for (var i = 0; i < templateIds.length; i++) {
+                var t = allTemplates.find(function (item) { return item.id === templateIds[i]; });
+                if (t && t.attributes && t.attributes.some(function (a) { return a.name === attr.name; })) {
+                    matchedTpl = t;
+                    break;
+                }
+            }
+            if (!matchedTpl) {
+                matchedTpl = allTemplates.find(function (t) {
+                    return t.attributes && t.attributes.some(function (a) { return a.name === attr.name; });
+                });
+            }
+            var groupName = matchedTpl ? (matchedTpl.name || matchedTpl.id) : "Direct / Custom Attributes";
+
+            if (!groups[groupName]) {
+                groups[groupName] = [];
+                groupOrder.push(groupName);
+            }
+            groups[groupName].push(attr);
+        });
+
+        groupOrder.sort(function (a, b) {
+            if (a === "Direct / Custom Attributes") return 1;
+            if (b === "Direct / Custom Attributes") return -1;
+            return String(a).localeCompare(String(b), undefined, { sensitivity: "base" });
+        });
+
+        groupOrder.forEach(function (gName) {
+            groups[gName].sort(function (a, b) {
+                return String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+            });
+        });
+
+        groupOrder.forEach(function (groupName) {
+            var attrs = groups[groupName];
+            if (!attrs || attrs.length === 0) return;
+
+            var groupHeaderTr = $('<tr class="kufayeka-asset-group-header"></tr>').appendTo(tableBody);
+            var groupHeaderTd = $('<td colspan="7"></td>').css({
+                "background": "var(--red-ui-tertiary-background, #f1f5f9)",
+                "font-weight": "700",
+                "font-size": "11px",
+                "padding": "7px 12px",
+                "color": "var(--red-ui-primary-text-color, #1e293b)",
+                "border-top": "1px solid var(--red-ui-secondary-border-color, #e2e8f0)",
+                "border-bottom": "1px solid var(--red-ui-secondary-border-color, #e2e8f0)"
+            }).appendTo(groupHeaderTr);
+
+            $('<i class="fa fa-cubes" style="margin-right:6px; color:var(--red-ui-text-color-link, #0284c7);"></i>').appendTo(groupHeaderTd);
+            $('<span>').text(groupName).appendTo(groupHeaderTd);
+            $('<span style="font-weight:normal; font-size:10px; color:var(--red-ui-secondary-text-color, #64748b); margin-left:8px;">(' + attrs.length + ' attribute' + (attrs.length > 1 ? 's' : '') + ')</span>').appendTo(groupHeaderTd);
+
+            attrs.forEach(function (attr) {
+                var fullPath = assetPath + "." + attr.name;
+                var tr = $("<tr>").attr("data-attr-name", attr.name).appendTo(tableBody);
+
+                // 1. Attribute Name
+                $("<td>").css({ "font-weight": "600", "white-space": "nowrap", "padding-left": "20px" }).text(attr.name).appendTo(tr);
+
+                // 2. Description
+                $("<td>").css({ "color": "var(--red-ui-secondary-text-color, #64748b)", "font-size": "11px", "white-space": "nowrap" }).text(attr.description || "-").appendTo(tr);
+
+                // 3. Value Editor
+                var tdVal = $("<td>").css({ "min-width": "190px" }).appendTo(tr);
+                var valInput = $('<input type="text" class="kufayeka-attr-val-input" style="width:100%">').appendTo(tdVal);
+
+                var inputType = "str";
+                if (attr.valueType === "number") {
+                    inputType = "num";
+                } else if (attr.valueType === "boolean") {
+                    inputType = "bool";
+                } else if (attr.valueType === "object" || attr.valueType === "array") {
+                    inputType = "json";
+                }
+
+                valInput.typedInput({
+                    types: [inputType, "str", "json"]
+                });
+
+                var initialVal = attr.value !== undefined && attr.value !== null ? (typeof attr.value === "object" ? JSON.stringify(attr.value) : String(attr.value)) : "";
+                valInput.typedInput("type", inputType);
+                valInput.typedInput("value", initialVal);
+
+                // 4. Action (Apply button)
+                var tdAction = $("<td>").css({ "white-space": "nowrap", "text-align": "center" }).appendTo(tr);
+                var applyBtn = $('<button class="red-ui-button red-ui-button-small" style="padding:2px 8px;"><i class="fa fa-check"></i> Apply</button>')
+                    .appendTo(tdAction)
+                    .on("click", function (evt) {
+                        evt.preventDefault();
+                        var chosenType = valInput.typedInput("type");
+                        var raw = valInput.typedInput("value");
+                        var parsedVal = raw;
+
+                        if (chosenType === "num") {
+                            parsedVal = Number(raw);
+                        } else if (chosenType === "bool") {
+                            parsedVal = raw === "true" || raw === "1" || raw === true;
+                        } else if (chosenType === "json") {
+                            try { parsedVal = JSON.parse(raw); } catch (e) { }
+                        }
+
+                        function onApplySuccess(resp) {
+                            RED.notify("Saved " + attr.name, "success");
+                            var match = resp && Array.isArray(resp.matches) && resp.matches[0];
+                            if (match) {
+                                attr.value = match.value;
+                                attr.ts = match.ts;
+                                tdTs.text(match.ts ? new Date(match.ts).toLocaleTimeString() : "-");
+                            }
+                        }
+
+                        $.ajax({
+                            url: "api/assets/value/" + encodeURIComponent(fullPath),
+                            type: "PUT",
+                            contentType: "application/json",
+                            data: JSON.stringify({ value: parsedVal }),
+                            success: onApplySuccess,
+                            error: function () {
+                                $.ajax({
+                                    url: "assets/value/" + encodeURIComponent(fullPath),
+                                    type: "PUT",
+                                    contentType: "application/json",
+                                    data: JSON.stringify({ value: parsedVal }),
+                                    success: onApplySuccess,
+                                    error: function () {
+                                        RED.notify("Failed to save " + attr.name, "error");
+                                    }
+                                });
+                            }
+                        });
+                    });
+                RED.popover.tooltip(applyBtn, "Apply Value to Runtime");
+
+                // 5. Unit
+                $("<td>").css({ "white-space": "nowrap" }).text(attr.unit || "-").appendTo(tr);
+
+                // 6. Updated TS
+                var tdTs = $("<td>").addClass("kufayeka-attr-ts").css({ "white-space": "nowrap", "font-size": "11px", "color": "var(--red-ui-secondary-text-color, #64748b)" }).text(attr.ts ? new Date(attr.ts).toLocaleTimeString() : "-").appendTo(tr);
+
+                // 7. Historian
+                $("<td>").css({ "white-space": "nowrap" }).text(attr.historianEnabled ? "Yes (" + (attr.historianTargetId || "default") + ")" : "No").appendTo(tr);
+            });
+        });
+    }
+
+    function addAsset(parentId) {
+        var makeId = (window.KufayekaUtils && window.KufayekaUtils.makeId) || function (p) { return (p || "id") + "_" + Math.random().toString(36).substr(2, 9); };
+        var globalSection = getStore().getGlobalSection();
+        var newId = makeId("asset");
+        var newName = "Asset_" + ((globalSection.assets || []).length + 1);
+        globalSection.assets = globalSection.assets || [];
+        globalSection.assets.push({
+            id: newId,
+            name: newName,
+            parentId: parentId,
+            templateIds: [],
+            attributes: {}
+        });
+        saveSchema(function () {
+            refreshTree();
+            selectAsset(newId);
+        });
+    }
+
+    function removeAsset(assetId) {
+        if (!assetId) return;
+        if (!confirm("Delete asset and all its children?")) return;
+
+        var globalSection = getStore().getGlobalSection();
+        function collectIds(id) {
+            var ids = [id];
+            (globalSection.assets || []).filter(function (a) { return a.parentId === id; }).forEach(function (child) {
+                ids = ids.concat(collectIds(child.id));
+            });
+            return ids;
+        }
+
+        var toRemove = new Set(collectIds(assetId));
+        globalSection.assets = (globalSection.assets || []).filter(function (a) { return !toRemove.has(a.id); });
+        currentAssetId = null;
+        saveSchema(function () {
+            refreshTree();
+            selectAsset(null);
+        });
+    }
+
+    function saveSchema(callback) {
+        getStore().saveSchemaToConfigNode(callback);
+    }
+
+    return { init: init, refresh: load };
+})();
+
+window.KufayekaTabs = window.KufayekaTabs || {};
+window.KufayekaTabs.AssetManagerTab = KufayekaAssetManagerTab;
+
+/**
+ * Asset Template Sidebar Tab for Node-RED.
+ * Manages attribute templates, metadata definitions, type/default inputs,
+ * historian configurations, autocomplete time-sources, and calculation script tray triggers.
+ */
+
+var KufayekaAssetTemplateTab = (function () {
+    var tree;
+    var currentTemplateId = null;
+    var templateDetailPane;
+    var attrTableBody;
+
+    function getStore() {
+        return window.KufayekaSchemaStore;
+    }
+
+    function init() {
+        if (RED.sidebar.containsTab && RED.sidebar.containsTab("kufayeka-asset-template")) return;
+
+        var content = $("<div>").css({ position: "relative", height: "100%", width: "100%" });
+
+        var stack = $("<div>", { class: "red-ui-sidebar-context-stack" })
+            .css({
+                display: "flex",
+                "flex-direction": "column",
+                height: "100%",
+                width: "100%",
+                "overflow-x": "auto",
+                "overflow-y": "auto"
+            })
+            .appendTo(content);
+
+        var mainRow = $("<div>")
+            .css({
+                display: "flex",
+                "flex-direction": "row",
+                height: "100%",
+                width: "100%",
+                "min-width": "1480px",
+                "min-height": "100%"
+            })
+            .appendTo(stack);
+
+        // Column 1 (Left - Full Height Template List)
+        var treeColumn = $("<div>").css({
+            flex: "0 0 260px",
+            "min-width": "230px",
+            "max-width": "320px",
+            display: "flex",
+            "flex-direction": "column",
+            height: "100%",
+            "border-right": "1px solid var(--red-ui-secondary-border-color, #e0e0e0)",
+            background: "var(--red-ui-secondary-background, #fafafa)"
+        }).appendTo(mainRow);
+
+        var listToolbar = $("<div>").css({
+            display: "flex",
+            gap: "4px",
+            padding: "8px 6px",
+            "flex-shrink": "0",
+            "border-bottom": "1px solid var(--red-ui-secondary-border-color, #f0f0f0)"
+        }).appendTo(treeColumn);
+
+        $('<button class="red-ui-button red-ui-button-small">Add Template</button>').appendTo(listToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            addTemplate();
+        });
+        $('<button class="red-ui-button red-ui-button-small">Delete</button>').appendTo(listToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            removeTemplate(currentTemplateId);
+        });
+        var tplRefreshBtn = $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-refresh"></i></button>').appendTo(listToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            load();
+        });
+        RED.popover.tooltip(tplRefreshBtn, "Refresh templates");
+
+        var listContainer = $("<div>").css({
+            flex: "1 1 auto",
+            "min-height": "0",
+            "overflow-y": "auto",
+            padding: "6px 4px"
+        }).appendTo(treeColumn);
+
+        tree = $("<div>").css({ width: "100%", height: "100%" }).appendTo(listContainer).treeList({ data: [] });
+        tree.on("treelistselect", function (evt, item) {
+            if (!item || !item.templateId) return;
+            selectTemplate(item.templateId);
+        });
+
+        // Column 2 (Right - 2 Rows Stacked Vertically)
+        var rightCol = $("<div>").css({
+            flex: "1 1 auto",
+            display: "flex",
+            "flex-direction": "column",
+            height: "100%",
+            "min-width": "1220px",
+            "overflow-y": "auto"
+        }).appendTo(mainRow);
+
+        // Row 1: Template Metadata Editor (Top)
+        var detailContainer = $("<div>").css({
+            flex: "0 0 auto",
+            padding: "12px 16px 8px 16px",
+            "border-bottom": "1px solid var(--red-ui-secondary-border-color, #e0e0e0)"
+        }).appendTo(rightCol);
+        templateDetailPane = $("<div>").appendTo(detailContainer);
+
+        // Row 2: Template Attributes Table Section (Bottom)
+        var attrSection = $("<div>").css({
+            flex: "1 1 auto",
+            display: "flex",
+            "flex-direction": "column",
+            padding: "8px 14px"
+        }).appendTo(rightCol);
+
+        var attrToolbar = $("<div>").css({
+            display: "flex",
+            gap: "6px",
+            padding: "4px 0 8px 0",
+            "align-items": "center",
+            "flex-shrink": "0"
+        }).appendTo(attrSection);
+
+        $('<button class="red-ui-button red-ui-button-small red-ui-button-primary"><i class="fa fa-plus"></i> Add Attribute</button>').appendTo(attrToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            addAttribute();
+        });
+        $('<span style="font-size:11px; color:var(--red-ui-secondary-text-color, #888); margin-left:8px;">Configure schema attributes defined by this template</span>').appendTo(attrToolbar);
+
+        var attrTableContainer = $("<div>").css({ flex: "1 1 auto" }).appendTo(attrSection);
+        var attrTable = $('<table class="kufayeka-asset-table"></table>').appendTo(attrTableContainer);
+        var attrHeadRow = $("<tr>").appendTo($("<thead>").appendTo(attrTable));
+        [
+            { name: "En", width: "45px" },
+            { name: "Name", width: "140px" },
+            { name: "Description", width: "180px" },
+            { name: "Type", width: "140px" },
+            { name: "Default Value", width: "170px" },
+            { name: "Unit", width: "110px" },
+            { name: "Historian", width: "75px" },
+            { name: "Time Source (Autocomplete)", width: "260px" },
+            { name: "Historian Target", width: "150px" },
+            { name: "Calculation Script", width: "90px" },
+            { name: "Action", width: "60px" }
+        ].forEach(function (col) {
+            $("<th>").text(col.name).css({ "width": col.width }).appendTo(attrHeadRow);
+        });
+        attrTableBody = $("<tbody>").appendTo(attrTable);
+
+        var footerToolbar = $("<div></div>");
+
+        RED.sidebar.addTab({
+            id: "kufayeka-asset-template",
+            label: "Asset Template",
+            name: "Asset Template",
+            iconClass: "fa fa-puzzle-piece",
+            content: content,
+            toolbar: footerToolbar,
+            enableOnEdit: true,
+            onchange: function () {
+                load();
+            }
+        });
+
+        if (RED.events && RED.events.on) {
+            RED.events.on("workspace:load", function () {
+                load();
+            });
+        }
+
+        load();
+    }
+
+    function load() {
+        $.getJSON("api/assets/system", function (resp) {
+            getStore().setGlobalSection(resp.data || resp);
+            refreshTemplateTree();
+            if (currentTemplateId && findTemplate(currentTemplateId)) {
+                selectTemplate(currentTemplateId);
+            } else {
+                selectTemplate(null);
+            }
+        }).fail(function () {
+            $.getJSON("assets/system", function (resp) {
+                getStore().setGlobalSection(resp.data || resp);
+                refreshTemplateTree();
+                if (currentTemplateId && findTemplate(currentTemplateId)) {
+                    selectTemplate(currentTemplateId);
+                } else {
+                    selectTemplate(null);
+                }
+            });
+        });
+    }
+
+    function findTemplate(id) {
+        var globalSection = getStore().getGlobalSection();
+        if (!globalSection || !globalSection.attributeTemplates) return null;
+        return globalSection.attributeTemplates.find(function (t) { return t.id === id; });
+    }
+
+    function refreshTemplateTree() {
+        var globalSection = getStore().getGlobalSection();
+        if (!globalSection || !globalSection.attributeTemplates) {
+            tree.treeList("data", []);
+            return;
+        }
+        var data = globalSection.attributeTemplates.map(function (t) {
+            return {
+                id: t.id,
+                templateId: t.id,
+                label: t.name || t.id,
+                icon: "fa fa-puzzle-piece",
+                selected: t.id === currentTemplateId
+            };
+        });
+        tree.treeList("data", data);
+    }
+
+    function selectTemplate(tplId) {
+        currentTemplateId = tplId;
+        renderTemplateDetail();
+        renderAttributes();
+    }
+
+    function renderTemplateDetail() {
+        templateDetailPane.empty();
+        if (!currentTemplateId) {
+            $("<div>").css({ padding: "12px", color: "var(--red-ui-secondary-text-color, #888)" }).text("Select a template to configure metadata").appendTo(templateDetailPane);
+            return;
+        }
+        var tpl = findTemplate(currentTemplateId);
+        if (!tpl) return;
+
+        var sanitize = (window.KufayekaUtils && window.KufayekaUtils.sanitizeIdentifier) || function (s) { return String(s || "").replace(/\s+/g, "_"); };
+        var form = $("<div>").appendTo(templateDetailPane);
+
+        // Template Name
+        var rowName = $('<div class="form-row" style="margin-bottom:8px"></div>').appendTo(form);
+        $("<label style='font-size:11px; font-weight:bold; display:block; margin-bottom:2px;'>Template Name</label>").appendTo(rowName);
+        var nameInput = $('<input type="text" class="red-ui-input" style="width:100%">').val(tpl.name || "").appendTo(rowName);
+        nameInput.on("input", function () {
+            var val = $(this).val();
+            var sanitized = sanitize(val);
+            if (val !== sanitized) {
+                var pos = this.selectionStart;
+                $(this).val(sanitized);
+                if (this.setSelectionRange && pos !== null) {
+                    this.setSelectionRange(pos, pos);
+                }
+            }
+            tpl.name = sanitized;
+        });
+        nameInput.on("change", function () {
+            var sanitized = sanitize($(this).val());
+            $(this).val(sanitized);
+            tpl.name = sanitized;
+            refreshTemplateTree();
+            getStore().saveSchemaToConfigNode();
+        });
+
+        // Template Description
+        var rowDesc = $('<div class="form-row" style="margin-bottom:8px"></div>').appendTo(form);
+        $("<label style='font-size:11px; font-weight:bold; display:block; margin-bottom:2px;'>Template Description</label>").appendTo(rowDesc);
+        var descInput = $('<input type="text" class="red-ui-input" style="width:100%" placeholder="e.g. Standard specifications, sensors, and actuator attributes">')
+            .val(tpl.description || "")
+            .appendTo(rowDesc);
+        descInput.on("change", function () {
+            tpl.description = $(this).val();
+            getStore().saveSchemaToConfigNode();
+        });
+
+        // Template ID
+        var rowId = $('<div class="form-row" style="margin-bottom:4px"></div>').appendTo(form);
+        $("<span style='font-size:10px; color:var(--red-ui-secondary-text-color, #888);'>ID: <code>" + tpl.id + "</code></span>").appendTo(rowId);
+    }
+
+    function renderAttributes() {
+        attrTableBody.empty();
+        if (!currentTemplateId) return;
+
+        var tpl = findTemplate(currentTemplateId);
+        if (!tpl || !tpl.attributes || tpl.attributes.length === 0) {
+            $('<tr><td colspan="10" style="text-align:center; color:var(--red-ui-secondary-text-color, #888); padding:20px;">No attributes defined in this template. Click "+ Add Attribute" to create one.</td></tr>').appendTo(attrTableBody);
+            return;
+        }
+
+        var globalSection = getStore().getGlobalSection();
+        var sanitize = (window.KufayekaUtils && window.KufayekaUtils.sanitizeIdentifier) || function (s) { return String(s || "").replace(/\s+/g, "_"); };
+        var histTargets = (globalSection.historians || []).map(function (h) {
+            return { value: h.id, label: h.name || h.id };
+        });
+        if (histTargets.length === 0) {
+            histTargets.push({ value: "default", label: "Default Historian" });
+        }
+
+        tpl.attributes.forEach(function (attr, idx) {
+            var tr = $("<tr>").appendTo(attrTableBody);
+
+            // 1. Enabled Checkbox
+            var tdEn = $("<td>").css({ "text-align": "center", "width": "45px" }).appendTo(tr);
+            $('<input type="checkbox">').prop("checked", attr.enabled !== false).appendTo(tdEn).on("change", function () {
+                attr.enabled = $(this).prop("checked");
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 2. Name
+            var tdName = $("<td>").css({ "min-width": "140px" }).appendTo(tr);
+            var attrNameInput = $('<input type="text" class="red-ui-input" style="width:100%">').val(attr.name || "").appendTo(tdName);
+            attrNameInput.on("input", function () {
+                var val = $(this).val();
+                var sanitized = sanitize(val);
+                if (val !== sanitized) {
+                    var pos = this.selectionStart;
+                    $(this).val(sanitized);
+                    if (this.setSelectionRange && pos !== null) {
+                        this.setSelectionRange(pos, pos);
+                    }
+                }
+                attr.name = sanitized;
+            });
+            attrNameInput.on("change", function () {
+                var sanitized = sanitize($(this).val());
+                $(this).val(sanitized);
+                attr.name = sanitized;
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 3. Description
+            var tdDesc = $("<td>").css({ "min-width": "180px" }).appendTo(tr);
+            $('<input type="text" class="red-ui-input" style="width:100%" placeholder="Description">')
+                .val(attr.description || "")
+                .appendTo(tdDesc)
+                .on("change", function () {
+                    attr.description = $(this).val();
+                    getStore().saveSchemaToConfigNode();
+                });
+
+            // 4. Type (TypedInput Single-Select Options)
+            var tdType = $("<td>").css({ "min-width": "140px" }).appendTo(tr);
+            var typeInput = $('<input type="text" style="width:100%">').appendTo(tdType);
+            typeInput.typedInput({
+                types: [
+                    {
+                        value: "type",
+                        icon: "fa fa-sliders",
+                        options: [
+                            { value: "number", label: "number" },
+                            { value: "string", label: "string" },
+                            { value: "boolean", label: "boolean" },
+                            { value: "object", label: "object" },
+                            { value: "array", label: "array" }
+                        ]
+                    }
+                ]
+            });
+            typeInput.typedInput("value", attr.valueType || "string");
+            typeInput.on("change", function () {
+                attr.valueType = typeInput.typedInput("value");
+                renderAttributes();
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 5. Default Value
+            var tdDef = $("<td>").css({ "min-width": "170px" }).appendTo(tr);
+            var defInput = $('<input type="text" style="width:100%">').appendTo(tdDef);
+            var defType = "str";
+            if (attr.valueType === "number") defType = "num";
+            else if (attr.valueType === "boolean") defType = "bool";
+            else if (attr.valueType === "object" || attr.valueType === "array") defType = "json";
+
+            defInput.typedInput({ types: [defType, "str", "json"] });
+            defInput.typedInput("type", defType);
+            defInput.typedInput(
+                "value",
+                attr.default !== undefined && attr.default !== null
+                    ? (typeof attr.default === "object" ? JSON.stringify(attr.default) : String(attr.default))
+                    : ""
+            );
+            defInput.on("change", function () {
+                var cType = defInput.typedInput("type");
+                var raw = defInput.typedInput("value");
+                if (cType === "num") attr.default = Number(raw);
+                else if (cType === "bool") attr.default = raw === "true" || raw === true;
+                else if (cType === "json") {
+                    try { attr.default = JSON.parse(raw); } catch (e) { attr.default = raw; }
+                } else {
+                    attr.default = raw;
+                }
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 6. Unit
+            var tdUnit = $("<td>").css({ "min-width": "110px" }).appendTo(tr);
+            var unitInput = $('<input type="text" style="width:100%">').appendTo(tdUnit);
+            unitInput.typedInput({ types: ["str"] });
+            unitInput.typedInput("value", attr.unit || "");
+            unitInput.on("change", function () {
+                attr.unit = unitInput.typedInput("value");
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 7. Historian Enabled
+            var tdHist = $("<td>").css({ "text-align": "center", "width": "75px" }).appendTo(tr);
+            $('<input type="checkbox">').prop("checked", attr.historianEnabled === true).appendTo(tdHist).on("change", function () {
+                attr.historianEnabled = $(this).prop("checked");
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 8. Time Source Path with Live Autocomplete Search Dropdown
+            var tdTime = $("<td>").css({ "min-width": "260px" }).appendTo(tr);
+            var timeInput = $('<input type="text" class="red-ui-input" style="width:100%" placeholder="default (now) or search asset path...">')
+                .val(attr.historianTimeSourcePath || "")
+                .appendTo(tdTime);
+
+            timeInput.autoComplete({
+                minLength: 0,
+                search: function (val, done) {
+                    var allPaths = (window.KufayekaUtils && window.KufayekaUtils.getAllAttributePaths)
+                        ? window.KufayekaUtils.getAllAttributePaths(getStore().getGlobalSection(), getStore().getGlobalHierarchyById())
+                        : [];
+                    var query = (val || "").trim().toLowerCase();
+                    var matches = allPaths;
+                    if (query) {
+                        matches = allPaths.filter(function (p) {
+                            return p.toLowerCase().indexOf(query) !== -1;
+                        });
+                    }
+                    if (typeof done === "function") {
+                        done(matches);
+                    } else {
+                        return matches;
+                    }
+                }
+            });
+
+            timeInput.on("change", function () {
+                attr.historianTimeSourcePath = $(this).val();
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 9. Historian Target
+            var tdHistTgt = $("<td>").css({ "min-width": "150px" }).appendTo(tr);
+            var tgtInput = $('<input type="text" style="width:100%">').appendTo(tdHistTgt);
+            tgtInput.typedInput({
+                types: [
+                    {
+                        value: "target",
+                        icon: "fa fa-database",
+                        options: histTargets
+                    }
+                ]
+            });
+            tgtInput.typedInput("value", attr.historianTargetId || "default");
+            tgtInput.on("change", function () {
+                attr.historianTargetId = tgtInput.typedInput("value");
+                getStore().saveSchemaToConfigNode();
+            });
+
+            // 10. Calculation Script
+            var tdScript = $("<td>").css({ "text-align": "center", "width": "90px" }).appendTo(tr);
+            var scriptEnabled = !!(attr.script && attr.script.enabled);
+            var scriptBtn = $(
+                '<button class="red-ui-button red-ui-button-small" style="white-space:nowrap;">' +
+                '<i class="fa fa-code" style="' + (scriptEnabled ? "color:#059669;" : "") + '"></i> ' +
+                (scriptEnabled ? "On" : "Off") +
+                '</button>'
+            ).appendTo(tdScript);
+            scriptBtn.on("click", function (evt) {
+                evt.preventDefault();
+                var openEditor = (window.KufayekaComponents && window.KufayekaComponents.openAttributeScriptEditor) || openAttributeScriptEditor;
+                openEditor(attr, function () {
+                    renderAttributes();
+                    getStore().saveSchemaToConfigNode();
+                });
+            });
+            RED.popover.tooltip(scriptBtn, "Configure a JS calculation that runs when this attribute is written to");
+
+            // 11. Delete action
+            var tdAction = $("<td>").css({ "text-align": "center", "width": "60px" }).appendTo(tr);
+            $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-trash"></i></button>').appendTo(tdAction).on("click", function (evt) {
+                evt.preventDefault();
+                tpl.attributes.splice(idx, 1);
+                renderAttributes();
+                getStore().saveSchemaToConfigNode();
+            });
+        });
+    }
+
+    function addTemplate() {
+        var makeId = (window.KufayekaUtils && window.KufayekaUtils.makeId) || function (p) { return (p || "id") + "_" + Math.random().toString(36).substr(2, 9); };
+        var globalSection = getStore().getGlobalSection();
+        var newId = makeId("tpl");
+        var newName = "Template_" + ((globalSection.attributeTemplates || []).length + 1);
+        globalSection.attributeTemplates = globalSection.attributeTemplates || [];
+        globalSection.attributeTemplates.push({
+            id: newId,
+            name: newName,
+            description: "",
+            attributes: []
+        });
+        refreshTemplateTree();
+        selectTemplate(newId);
+        getStore().saveSchemaToConfigNode();
+    }
+
+    function removeTemplate(tplId) {
+        if (!tplId) return;
+        if (!confirm("Delete this template?")) return;
+        var globalSection = getStore().getGlobalSection();
+        globalSection.attributeTemplates = (globalSection.attributeTemplates || []).filter(function (t) { return t.id !== tplId; });
+        currentTemplateId = null;
+        refreshTemplateTree();
+        renderTemplateDetail();
+        renderAttributes();
+        getStore().saveSchemaToConfigNode();
+    }
+
+    function addAttribute() {
+        if (!currentTemplateId) {
+            RED.notify("Select a template first", "warning");
+            return;
+        }
+        var tpl = findTemplate(currentTemplateId);
+        if (!tpl) return;
+        tpl.attributes = tpl.attributes || [];
+        tpl.attributes.push({
+            enabled: true,
+            name: "attr_" + (tpl.attributes.length + 1),
+            description: "",
+            valueType: "number",
+            default: 0,
+            unit: "",
+            historianEnabled: false,
+            historianTimeSourcePath: "",
+            historianTargetId: "default"
+        });
+        renderAttributes();
+        getStore().saveSchemaToConfigNode();
+    }
+
+    return { init: init, refresh: load };
+})();
+
+window.KufayekaTabs = window.KufayekaTabs || {};
+window.KufayekaTabs.AssetTemplateTab = KufayekaAssetTemplateTab;
+
+/**
+ * Trigger Schedules Sidebar Tab for Node-RED.
+ * Provides centralized schedule management (one kufayeka-trigger-schedule config node per row)
+ * for shared interval, cron, and inject consumers.
+ */
+
+var KufayekaTriggerScheduleTab = (function () {
+    var tree;
+    var currentScheduleId = null;
+    var detailPane;
+
+    function init() {
+        if (RED.sidebar.containsTab && RED.sidebar.containsTab("kufayeka-trigger-schedules")) return;
+
+        var content = $("<div>").css({ position: "relative", height: "100%" });
+        var mainRow = $("<div>").css({ display: "flex", "flex-direction": "row", height: "100%", "min-width": "600px" }).appendTo(content);
+
+        var listColumn = $("<div>").css({
+            flex: "0 0 220px", "min-width": "200px", "max-width": "280px",
+            display: "flex", "flex-direction": "column", height: "100%",
+            "border-right": "1px solid var(--red-ui-secondary-border-color, #e0e0e0)",
+            background: "var(--red-ui-secondary-background, #fafafa)"
+        }).appendTo(mainRow);
+
+        var listToolbar = $("<div>").css({ display: "flex", gap: "4px", padding: "8px 6px", "flex-shrink": "0", "border-bottom": "1px solid var(--red-ui-secondary-border-color, #f0f0f0)" }).appendTo(listColumn);
+        $('<button class="red-ui-button red-ui-button-small">Add Schedule</button>').appendTo(listToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            addSchedule();
+        });
+        $('<button class="red-ui-button red-ui-button-small">Delete</button>').appendTo(listToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            removeSchedule(currentScheduleId);
+        });
+        var refreshBtn = $('<button class="red-ui-button red-ui-button-small"><i class="fa fa-refresh"></i></button>').appendTo(listToolbar).on("click", function (evt) {
+            evt.preventDefault();
+            load();
+        });
+        RED.popover.tooltip(refreshBtn, "Refresh trigger schedule list");
+
+        var listContainer = $("<div>").css({ flex: "1 1 auto", "min-height": "0", "overflow-y": "auto", padding: "6px 4px" }).appendTo(listColumn);
+        tree = $("<div>").css({ width: "100%", height: "100%" }).appendTo(listContainer).treeList({ data: [] });
+        tree.on("treelistselect", function (evt, item) {
+            if (!item || !item.scheduleId) return;
+            selectSchedule(item.scheduleId);
+        });
+
+        var detailColumn = $("<div>").css({ flex: "1 1 auto", height: "100%", "overflow-y": "auto", padding: "12px 18px" }).appendTo(mainRow);
+        detailPane = $("<div>").appendTo(detailColumn);
+
+        RED.sidebar.addTab({
+            id: "kufayeka-trigger-schedules",
+            label: "Triggers",
+            name: "Trigger Schedules",
+            iconClass: "fa fa-clock-o",
+            content: content,
+            enableOnEdit: true,
+            onchange: function () {
+                load();
+            }
+        });
+
+        if (RED.events && RED.events.on) {
+            RED.events.on("workspace:load", function () {
+                load();
+            });
+            RED.events.on("nodes:add", function (node) {
+                if (node && node.type === "kufayeka-trigger-schedule") {
+                    load();
+                }
+            });
+            RED.events.on("nodes:remove", function (node) {
+                if (node && node.type === "kufayeka-trigger-schedule") {
+                    if (currentScheduleId === node.id) {
+                        currentScheduleId = null;
+                    }
+                    load();
+                }
+            });
+            RED.events.on("nodes:change", function (node) {
+                if (node && node.type === "kufayeka-trigger-schedule") {
+                    refreshTreeList();
+                    if (currentScheduleId === node.id) {
+                        renderDetail();
+                    }
+                }
+            });
+        }
+
+        load();
+    }
+
+    function listSchedules() {
+        var list = [];
+        var seen = {};
+        function addIfMatch(n) {
+            if (!n || !n.id || seen[n.id]) return;
+            if (n.type === "kufayeka-trigger-schedule") {
+                seen[n.id] = true;
+                list.push(n);
+            }
+        }
+        if (RED.nodes.eachConfig) {
+            RED.nodes.eachConfig(addIfMatch);
+        }
+        if (RED.nodes.eachNode) {
+            RED.nodes.eachNode(addIfMatch);
+        }
+        if (RED.nodes.filterNodes) {
+            var filtered = RED.nodes.filterNodes({ type: "kufayeka-trigger-schedule" });
+            if (Array.isArray(filtered)) {
+                filtered.forEach(addIfMatch);
+            }
+        }
+        list.sort(function (a, b) {
+            var nameA = (a.name || a.id || "").toLowerCase();
+            var nameB = (b.name || b.id || "").toLowerCase();
+            return nameA.localeCompare(nameB);
+        });
+        return list;
+    }
+
+    function findSchedule(id) {
+        if (!id) return null;
+        if (RED.nodes.node) {
+            var n = RED.nodes.node(id);
+            if (n && n.type === "kufayeka-trigger-schedule") return n;
+        }
+        var found = null;
+        if (RED.nodes.eachConfig) {
+            RED.nodes.eachConfig(function (n) { if (n && n.id === id && n.type === "kufayeka-trigger-schedule") found = n; });
+        }
+        if (!found && RED.nodes.eachNode) {
+            RED.nodes.eachNode(function (n) { if (n && n.id === id && n.type === "kufayeka-trigger-schedule") found = n; });
+        }
+        return found;
+    }
+
+    function refreshTreeList() {
+        var schedules = listSchedules();
+        var data = schedules.map(function (n) {
+            var label = n.name || ("Schedule (" + (n.repeat ? "every " + n.repeat + "s" : n.crontab || n.id) + ")");
+            return { id: n.id, scheduleId: n.id, label: label, icon: "fa fa-clock-o", selected: n.id === currentScheduleId };
+        });
+        tree.treeList("data", data);
+    }
+
+    function load() {
+        refreshTreeList();
+        var schedules = listSchedules();
+        if (currentScheduleId && findSchedule(currentScheduleId)) {
+            selectSchedule(currentScheduleId);
+        } else if (schedules.length > 0) {
+            selectSchedule(schedules[0].id);
+        } else {
+            selectSchedule(null);
+        }
+    }
+
+    function addSchedule() {
+        var newNode = {
+            id: RED.nodes.id(),
+            type: "kufayeka-trigger-schedule",
+            name: "Schedule_" + (listSchedules().length + 1),
+            repeat: "",
+            crontab: "",
+            once: false,
+            onceDelay: 0.1,
+            users: []
+        };
+        newNode._def = RED.nodes.getType("kufayeka-trigger-schedule");
+        RED.nodes.add(newNode);
+        RED.nodes.dirty(true);
+        refreshTreeList();
+        selectSchedule(newNode.id);
+    }
+
+    function removeSchedule(id) {
+        if (!id) return;
+        if (!confirm("Delete this trigger schedule? Any node or attribute script referencing it will stop firing.")) return;
+        RED.nodes.remove(id);
+        RED.nodes.dirty(true);
+        currentScheduleId = null;
+        refreshTreeList();
+        selectSchedule(null);
+    }
+
+    function selectSchedule(id) {
+        currentScheduleId = id;
+        renderDetail();
+        refreshTreeList();
+    }
+
+    function renderDetail() {
+        detailPane.empty();
+        if (!currentScheduleId) {
+            $("<div>").css({ padding: "12px", color: "var(--red-ui-secondary-text-color, #888)" }).text("Select a schedule on the left, or click \"Add Schedule\" to create one.").appendTo(detailPane);
+            return;
+        }
+        var node = findSchedule(currentScheduleId);
+        if (!node) return;
+
+        var sanitize = (window.KufayekaUtils && window.KufayekaUtils.sanitizeIdentifier) || function (s) { return String(s || "").replace(/\s+/g, "_"); };
+        var form = $("<div>").appendTo(detailPane);
+
+        var rowName = $('<div class="form-row" style="margin-bottom:10px"></div>').appendTo(form);
+        $("<label style='font-size:11px; font-weight:bold; display:block; margin-bottom:2px;'>Name</label>").appendTo(rowName);
+        var nameInput = $('<input type="text" class="red-ui-input" style="width:100%">').val(node.name || "").appendTo(rowName);
+        nameInput.on("input", function () {
+            var val = $(this).val();
+            var sanitized = sanitize(val);
+            if (val !== sanitized) {
+                var pos = this.selectionStart;
+                $(this).val(sanitized);
+                if (this.setSelectionRange && pos !== null) {
+                    this.setSelectionRange(pos, pos);
+                }
+            }
+            node.name = sanitized;
+        });
+        nameInput.on("change", function () {
+            var sanitized = sanitize($(this).val());
+            $(this).val(sanitized);
+            node.name = sanitized;
+            node.dirty = true;
+            if (RED.nodes && RED.nodes.dirty) {
+                RED.nodes.dirty(true);
+            }
+            refreshTreeList();
+        });
+
+        var buildPicker = (window.KufayekaComponents && window.KufayekaComponents.buildTriggerSchedulePicker) || buildTriggerSchedulePicker;
+        buildPicker(form, node, function () {
+            node.dirty = true;
+            if (RED.nodes && RED.nodes.dirty) {
+                RED.nodes.dirty(true);
+            }
+            refreshTreeList();
+        });
+
+        $('<div style="margin-top:14px; font-size:11px; color:var(--red-ui-secondary-text-color, #888);">Reference this schedule from an attribute\'s Calculation Script ("shared trigger schedule" mode) or from a <b>kufayeka-inject</b> node on the canvas — every consumer of the SAME schedule fires from the identical clock tick.</div>').appendTo(form);
+    }
+
+    return { init: init, refresh: load };
+})();
+
+window.KufayekaTabs = window.KufayekaTabs || {};
+window.KufayekaTabs.TriggerScheduleTab = KufayekaTriggerScheduleTab;
+
+    // ==========================================
+    // 5. INTELLISENSE & CODE COMPLETION
+    // ==========================================
+/**
+ * Monaco and Ace IntelliSense & Autocomplete Service.
+ * Generates dynamic TypeScript (.d.ts) declarations for `$`, `asset`, `%path` variables,
+ * and provides completion item providers for Monaco and Ace editors.
+ */
+
+var KufayekaIntellisense = (function () {
+    var monacoRegistered = false;
+    var monacoExtraLibDisposable = null;
+    var aceRegistered = false;
+
+    function getStore() {
+        return window.KufayekaSchemaStore;
+    }
+
+    function getAttributeItemsDetailed() {
+        var items = [];
+        var globalHierarchyById = getStore().getGlobalHierarchyById();
+        if (globalHierarchyById && Object.keys(globalHierarchyById).length > 0) {
+            Object.values(globalHierarchyById).forEach(function (hNode) {
+                var prefix = hNode.path || hNode.name;
+                (hNode.effectiveAttributes || []).forEach(function (attr) {
+                    if (attr && attr.name) {
+                        items.push({
+                            path: prefix + "." + attr.name,
+                            assetPath: prefix,
+                            assetName: hNode.name,
+                            attrName: attr.name,
+                            value: attr.value,
+                            valueType: attr.valueType || "custom",
+                            unit: attr.unit || "",
+                            description: attr.description || "",
+                            ts: attr.ts
+                        });
+                    }
+                });
+            });
+        }
+        return items;
+    }
+
+    function updateMonacoAssetTypes() {
+        if (!window.monaco || !window.monaco.languages || !window.monaco.languages.typescript) return;
+        try {
+            var items = getAttributeItemsDetailed();
+            var rootTree = {};
+            items.forEach(function (item) {
+                var parts = item.path.split(".").filter(Boolean);
+                var curr = rootTree;
+                for (var i = 0; i < parts.length - 1; i++) {
+                    var p = parts[i];
+                    if (!curr[p]) curr[p] = { _children: {} };
+                    curr = curr[p]._children;
+                }
+                var last = parts[parts.length - 1];
+                curr[last] = { _isAttr: true, item: item };
+            });
+
+            function renderDts(tree, indent) {
+                indent = indent || "  ";
+                var lines = [];
+                for (var k in tree) {
+                    var node = tree[k];
+                    if (node._isAttr) {
+                        var it = node.item;
+                        var jsType = it.valueType === "number" ? "number" : it.valueType === "boolean" ? "boolean" : it.valueType === "json" ? "any" : "string";
+                        var doc = "/** " + (it.description ? it.description + " | " : "") + "Type: " + it.valueType + (it.unit ? " (" + it.unit + ")" : "") + " | Current: " + JSON.stringify(it.value) + " */";
+                        lines.push(indent + doc);
+                        lines.push(indent + '"' + k + '": ' + jsType + ';');
+                    } else if (node._children) {
+                        lines.push(indent + '"' + k + '": {');
+                        lines.push(renderDts(node._children, indent + "  "));
+                        lines.push(indent + '};');
+                    }
+                }
+                return lines.join("\n");
+            }
+
+            var dts = "interface KufayekaAssetTree {\n" + renderDts(rootTree, "  ") + "\n  [key: string]: any;\n}\n" +
+                "declare const $: KufayekaAssetTree & { (path: string, val?: any): any; [key: string]: any; };\n" +
+                "declare const asset: { get(path: string, fallback?: any): any; set(path: string, val: any): void; query(p: string): any[]; find(p: string, v: any): any; hierarchy(opt?: any): any; };\n";
+
+            for (var rootKey in rootTree) {
+                dts += 'declare const ' + rootKey + ': KufayekaAssetTree["' + rootKey + '"] & { [key: string]: any };\n';
+                dts += 'declare const $' + rootKey + ': KufayekaAssetTree["' + rootKey + '"] & { [key: string]: any };\n';
+            }
+
+            if (monacoExtraLibDisposable && monacoExtraLibDisposable.dispose) {
+                monacoExtraLibDisposable.dispose();
+            }
+            monacoExtraLibDisposable = monaco.languages.typescript.javascriptDefaults.addExtraLib(dts, 'ts:kufayeka-asset-engine.d.ts');
+
+            // Ensure Monaco TypeScript linter does not flag undeclared root variables or % operator
+            try {
+                var curDiag = monaco.languages.typescript.javascriptDefaults.getDiagnosticsOptions() || {};
+                var ignoredCodes = (curDiag.diagnosticCodesToIgnore || []).slice();
+                [2304, 2552, 1005, 1109].forEach(function (code) {
+                    if (ignoredCodes.indexOf(code) === -1) ignoredCodes.push(code);
+                });
+                monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions(Object.assign({}, curDiag, {
+                    diagnosticCodesToIgnore: ignoredCodes
+                }));
+            } catch (diagErr) { }
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    function registerMonacoCompleters() {
+        if (monacoRegistered || !window.monaco || !window.monaco.languages) return;
+        monacoRegistered = true;
+
+        var provider = {
+            triggerCharacters: ['%', '$', '.'],
+            provideCompletionItems: function (model, position) {
+                var textUntilPosition = model.getValueInRange({
+                    startLineNumber: position.lineNumber,
+                    startColumn: 1,
+                    endLineNumber: position.lineNumber,
+                    endColumn: position.column
+                });
+                var word = model.getWordUntilPosition(position);
+                var range = {
+                    startLineNumber: position.lineNumber,
+                    endLineNumber: position.lineNumber,
+                    startColumn: word.startColumn,
+                    endColumn: word.endColumn
+                };
+
+                var items = getAttributeItemsDetailed();
+                var suggestions = [];
+
+                items.forEach(function (item) {
+                    var displayVal = item.value !== undefined ? String(item.value) : "undefined";
+                    var docMarkdown = "**Asset Path:** `" + item.path + "`\n\n" +
+                        "**Current Value:** `" + displayVal + (item.unit ? " " + item.unit : "") + "`\n\n" +
+                        "**Type:** `" + item.valueType + "`\n\n" +
+                        (item.description ? "**Description:** " + item.description + "\n\n" : "") +
+                        (item.ts ? "*Timestamp: " + item.ts + "*" : "");
+
+                    // 1. %Path (Primary Asset Tag Identifier)
+                    suggestions.push({
+                        label: "%" + item.path,
+                        kind: monaco.languages.CompletionItemKind.Field,
+                        detail: "[" + (item.unit || item.valueType) + "] Live: " + displayVal,
+                        documentation: { value: docMarkdown },
+                        insertText: "%" + item.path,
+                        range: range,
+                        sortText: "0_" + item.path
+                    });
+
+                    // 2. Direct Path
+                    suggestions.push({
+                        label: item.path,
+                        kind: monaco.languages.CompletionItemKind.Property,
+                        detail: "[" + item.valueType + "] Live: " + displayVal,
+                        documentation: { value: docMarkdown },
+                        insertText: item.path,
+                        range: range,
+                        sortText: "1_" + item.path
+                    });
+                });
+
+                return { suggestions: suggestions };
+            }
+        };
+
+        monaco.languages.registerCompletionItemProvider('javascript', provider);
+        try {
+            if (monaco.languages.getLanguages().some(function (l) { return l.id === 'typescript'; })) {
+                monaco.languages.registerCompletionItemProvider('typescript', provider);
+            }
+        } catch (e) { }
+    }
+
+    function registerAceCompleters() {
+        if (aceRegistered || !window.ace) return;
+        try {
+            var langTools = ace.require("ace/ext/language_tools");
+            if (langTools && langTools.addCompleter) {
+                aceRegistered = true;
+                langTools.addCompleter({
+                    identifierRegexps: [/[a-zA-Z_0-9\$\%]/],
+                    getCompletions: function (editor, session, pos, prefix, callback) {
+                        var items = getAttributeItemsDetailed();
+                        var completions = [];
+                        items.forEach(function (item) {
+                            var displayVal = item.value !== undefined ? String(item.value) : "";
+                            completions.push({
+                                name: "%" + item.path,
+                                value: "%" + item.path,
+                                caption: "%" + item.path,
+                                meta: "[" + (item.unit || item.valueType) + "] " + displayVal,
+                                score: 1000
+                            });
+                            completions.push({
+                                name: item.path,
+                                value: item.path,
+                                caption: item.path,
+                                meta: "[" + (item.unit || item.valueType) + "] " + displayVal,
+                                score: 900
+                            });
+                        });
+                        callback(null, completions);
+                    }
+                });
+            }
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    function tryInitCodeCompleters() {
+        registerMonacoCompleters();
+        registerAceCompleters();
+        updateMonacoAssetTypes();
+    }
+
+    function init() {
+        tryInitCodeCompleters();
+        setInterval(tryInitCodeCompleters, 2000);
+    }
+
+    return {
+        init: init,
+        updateMonacoAssetTypes: updateMonacoAssetTypes,
+        tryInitCodeCompleters: tryInitCodeCompleters,
+        getAttributeItemsDetailed: getAttributeItemsDetailed
+    };
+})();
+
+window.KufayekaIntellisense = KufayekaIntellisense;
+
+    // ==========================================
+    // 6. EDITOR PLUGIN REGISTRATION
+    // ==========================================
+/**
+ * Kufayeka Asset Engine - Editor Plugin Entrypoint.
+ * Initializes the Sidebar tabs (Asset Manager, Asset Templates, Trigger Schedules),
+ * sets up IntelliSense / Code Completion, and registers with RED.plugins.
+ */
+
+(function () {
+    if (typeof RED === "undefined") return;
+
+    RED.plugins.registerPlugin("kufayeka-asset-engine", {
+        type: "node-red-editor-plugin",
+        onadd: function () {
+            if (window.KufayekaTabs) {
+                if (window.KufayekaTabs.AssetManagerTab) window.KufayekaTabs.AssetManagerTab.init();
+                if (window.KufayekaTabs.AssetTemplateTab) window.KufayekaTabs.AssetTemplateTab.init();
+                if (window.KufayekaTabs.TriggerScheduleTab) window.KufayekaTabs.TriggerScheduleTab.init();
+            }
+            if (window.KufayekaIntellisense) {
+                window.KufayekaIntellisense.init();
+            }
+
+            if (RED.comms && RED.comms.subscribe) {
+                RED.comms.subscribe("assets/changed", function (topic, data) {
+                    if (window.KufayekaIntellisense) {
+                        window.KufayekaIntellisense.updateMonacoAssetTypes();
+                    }
+                });
+            }
+        }
+    });
+})();
+
+})();
+</script>

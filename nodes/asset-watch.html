@@ -1,0 +1,113 @@
+<script type="text/javascript">
+  (function() {
+    function initAssetPathAutocomplete(inputSelector, includeWildcards) {
+      var input = $(inputSelector);
+      if (!input.length) return;
+
+      var cachedPaths = null;
+      function fetchPaths(cb) {
+        if (cachedPaths !== null) return cb(cachedPaths);
+        $.getJSON("api/assets/hierarchy?populated=true", function(resp) {
+          var paths = [];
+          function collect(nodes) {
+            (nodes || []).forEach(function(n) {
+              var prefix = n.path || n.name;
+              (n.effectiveAttributes || []).forEach(function(attr) {
+                if (attr && attr.name) paths.push(prefix + "." + attr.name);
+              });
+              collect(n.children);
+            });
+          }
+          collect(resp.data || resp);
+          if (includeWildcards) {
+            paths.unshift("*");
+          }
+          cachedPaths = Array.from(new Set(paths));
+          cb(cachedPaths);
+        }).fail(function() {
+          $.getJSON("assets/hierarchy?populated=true", function(resp) {
+            var paths = [];
+            function collect(nodes) {
+              (nodes || []).forEach(function(n) {
+                var prefix = n.path || n.name;
+                (n.effectiveAttributes || []).forEach(function(attr) {
+                  if (attr && attr.name) paths.push(prefix + "." + attr.name);
+                });
+                collect(n.children);
+              });
+            }
+            collect(resp.data || resp);
+            if (includeWildcards) {
+              paths.unshift("*");
+            }
+            cachedPaths = Array.from(new Set(paths));
+            cb(cachedPaths);
+          });
+        });
+      }
+
+      input.autoComplete({
+        minLength: 0,
+        search: function(val, done) {
+          fetchPaths(function(allPaths) {
+            var query = (val || "").trim().toLowerCase();
+            var results = allPaths;
+            if (query) {
+              results = allPaths.filter(function(p) {
+                return p.toLowerCase().indexOf(query) !== -1;
+              });
+            }
+            if (typeof done === "function") {
+              done(results);
+            } else {
+              return results;
+            }
+          });
+        }
+      });
+    }
+
+    RED.nodes.registerType('kufayeka-asset-watch', {
+      category: 'Asset Engine',
+      color: '#F59E0B',
+      defaults: {
+        name: { value: "" },
+        watchPath: { value: "*", required: true }
+      },
+      inputs: 0,
+      outputs: 1,
+      icon: "font-awesome/fa-eye",
+      label: function() {
+        return this.name || (this.watchPath ? "Watch " + this.watchPath : "Asset Watch");
+      },
+      paletteLabel: "Asset Watch",
+      oneditprepare: function() {
+        initAssetPathAutocomplete("#node-input-watchPath", true);
+      }
+    });
+  })();
+</script>
+
+<script type="text/html" data-template-name="kufayeka-asset-watch">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Name">
+  </div>
+  <div class="form-row">
+    <label for="node-input-watchPath"><i class="fa fa-cubes"></i> Watch Path</label>
+    <input type="text" id="node-input-watchPath" placeholder="e.g. Plant1.*.Speed or * (click for autocomplete)">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-asset-watch">
+  <p>Monitors the in-memory Kufayeka Asset Engine and triggers messages whenever an attribute matching the configured path or wildcard pattern changes.</p>
+  <h3>Outputs</h3>
+  <dl class="message-properties">
+    <dt>topic <span class="property-type">string</span></dt>
+    <dd>The full path of the attribute that changed (e.g. <code>Plant1.Line1.Motor1.Speed</code>).</dd>
+    <dt>payload <span class="property-type">any</span></dt>
+    <dd>The new attribute value.</dd>
+    <dt>attribute <span class="property-type">object</span></dt>
+    <dd>The full attribute match object (value, unit, timestamp, type).</dd>
+  </dl>
+</script>

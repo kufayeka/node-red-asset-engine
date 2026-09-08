@@ -1,0 +1,39 @@
+{
+  "name": "@kufayeka/node-red-asset-engine",
+  "version": "1.0.0",
+  "description": "Kufayeka Asset Engine Plugin & Nodes for Node-RED",
+  "main": "lib/asset-plugin.js",
+  "scripts": {
+    "test": "mocha \"test/**/*_spec.js\""
+  },
+  "dependencies": {
+    "cronosjs": "^1.7.1"
+  },
+  "node-red": {
+    "version": ">=4.0.0",
+    "plugins": {
+      "kufayeka-asset-engine": "lib/asset-plugin.js",
+      "kufayeka-asset-engine-editor": "lib/asset-plugin.html"
+    },
+    "nodes": {
+      "kufayeka-trigger-schedule": "nodes/trigger-schedule.js",
+      "kufayeka-inject": "nodes/inject-trigger.js",
+      "kufayeka-asset-schema": "nodes/asset-schema.js",
+      "kufayeka-asset-read": "nodes/asset-read.js",
+      "kufayeka-asset-multi-read": "nodes/asset-multi-read.js",
+      "kufayeka-asset-write": "nodes/asset-write.js",
+      "kufayeka-asset-multi-write": "nodes/asset-multi-write.js",
+      "kufayeka-asset-watch": "nodes/asset-watch.js",
+      "kufayeka-asset-function": "nodes/asset-function.js"
+    }
+  },
+  "keywords": [
+    "node-red",
+    "asset-engine",
+    "kufayeka",
+    "scada",
+    "tags",
+    "attributes",
+    "node-red-plugin"
+  ]
+}

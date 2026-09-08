@@ -1,0 +1,179 @@
+<script type="text/javascript">
+  (function() {
+    function initAssetPathAutocomplete(input, includeWildcards) {
+      if (!input || !input.length) return;
+
+      var cachedPaths = null;
+      function fetchPaths(cb) {
+        if (cachedPaths !== null) return cb(cachedPaths);
+        $.getJSON("api/assets/hierarchy?populated=true", function(resp) {
+          var paths = [];
+          function collect(nodes) {
+            (nodes || []).forEach(function(n) {
+              var prefix = n.path || n.name;
+              (n.effectiveAttributes || []).forEach(function(attr) {
+                if (attr && attr.name) paths.push(prefix + "." + attr.name);
+              });
+              collect(n.children);
+            });
+          }
+          collect(resp.data || resp);
+          if (includeWildcards) {
+            paths.unshift("*");
+          }
+          cachedPaths = Array.from(new Set(paths));
+          cb(cachedPaths);
+        }).fail(function() {
+          $.getJSON("assets/hierarchy?populated=true", function(resp) {
+            var paths = [];
+            function collect(nodes) {
+              (nodes || []).forEach(function(n) {
+                var prefix = n.path || n.name;
+                (n.effectiveAttributes || []).forEach(function(attr) {
+                  if (attr && attr.name) paths.push(prefix + "." + attr.name);
+                });
+                collect(n.children);
+              });
+            }
+            collect(resp.data || resp);
+            if (includeWildcards) {
+              paths.unshift("*");
+            }
+            cachedPaths = Array.from(new Set(paths));
+            cb(cachedPaths);
+          });
+        });
+      }
+
+      input.autoComplete({
+        minLength: 0,
+        search: function(val, done) {
+          fetchPaths(function(allPaths) {
+            var query = (val || "").trim().toLowerCase();
+            var results = allPaths;
+            if (query) {
+              results = allPaths.filter(function(p) {
+                return p.toLowerCase().indexOf(query) !== -1;
+              });
+            }
+            if (typeof done === "function") {
+              done(results);
+            } else {
+              return results;
+            }
+          });
+        }
+      });
+    }
+
+    RED.nodes.registerType('kufayeka-asset-multi-read', {
+      category: 'Asset Engine',
+      color: '#3B82F6',
+      defaults: {
+        name: { value: "" },
+        paths: { value: [""] },
+        property: { value: "payload", required: true },
+        propertyType: { value: "msg" },
+        outputMode: { value: "value" }
+      },
+      inputs: 1,
+      outputs: 1,
+      icon: "font-awesome/fa-list",
+      label: function() {
+        if (this.name) return this.name;
+        var count = (this.paths || []).filter(Boolean).length;
+        return count > 0 ? "Read " + count + " Paths" : "Asset Multi Read";
+      },
+      paletteLabel: "Asset Multi Read",
+      oneditprepare: function() {
+        var node = this;
+
+        $("#node-input-property").typedInput({
+          default: 'msg',
+          typeField: $("#node-input-propertyType"),
+          types: ['msg', 'flow', 'global']
+        });
+
+        $("#node-input-outputMode").typedInput({
+          types: [{
+            value: "outputMode",
+            options: [
+              { value: "value", label: "Array of Values" },
+              { value: "attribute", label: "Array of Attribute Objects (with unit & timestamp)" },
+              { value: "map", label: "Object / Key-Value Map ({ [path]: value })" }
+            ]
+          }]
+        });
+
+        var pathList = $("#node-input-paths-container").css('min-height', '180px').editableList({
+          addItem: function(container, i, opt) {
+            var currentVal = typeof opt === "string" ? opt : (opt.path || "");
+            var row = $('<div style="display:flex; align-items:center; gap:6px;"></div>').appendTo(container);
+            $('<i class="fa fa-cubes" style="color:var(--red-ui-secondary-text-color, #888)"></i>').appendTo(row);
+            var input = $('<input type="text" class="node-input-path-entry" style="flex:1;" placeholder="e.g. Plant1.Line1.Motor1.Speed">')
+              .val(currentVal)
+              .appendTo(row);
+            initAssetPathAutocomplete(input, true);
+          },
+          removable: true,
+          sortable: true
+        });
+
+        if (node.paths && node.paths.length > 0) {
+          node.paths.forEach(function(p) {
+            pathList.editableList('addItem', { path: p });
+          });
+        } else {
+          pathList.editableList('addItem', { path: "" });
+        }
+      },
+      oneditsave: function() {
+        var node = this;
+        var paths = [];
+        $("#node-input-paths-container").editableList('items').each(function() {
+          var val = $(this).find('.node-input-path-entry').val();
+          if (val && val.trim()) {
+            paths.push(val.trim());
+          }
+        });
+        node.paths = paths;
+      }
+    });
+  })();
+</script>
+
+<script type="text/html" data-template-name="kufayeka-asset-multi-read">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Name">
+  </div>
+  <div class="form-row">
+    <label for="node-input-property"><i class="fa fa-arrow-right"></i> Target Property</label>
+    <input type="text" id="node-input-property" style="width:70%;">
+    <input type="hidden" id="node-input-propertyType">
+  </div>
+  <div class="form-row">
+    <label for="node-input-outputMode"><i class="fa fa-list"></i> Output Mode</label>
+    <input type="text" id="node-input-outputMode" style="width:70%;">
+  </div>
+  <div class="form-row" style="margin-bottom:0px;">
+    <label><i class="fa fa-cubes"></i> Asset Paths</label>
+  </div>
+  <div class="form-row node-input-paths-container-row">
+    <ol id="node-input-paths-container"></ol>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-asset-multi-read">
+  <p>Reads multiple attribute values or queries from the Kufayeka in-memory Asset Engine in a single step.</p>
+  <h3>Inputs</h3>
+  <dl class="message-properties">
+    <dt class="optional">paths <span class="property-type">array | string</span></dt>
+    <dd>Dynamic list of asset paths to read (overrides node configuration if present).</dd>
+  </dl>
+  <h3>Outputs</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">array | object</span></dt>
+    <dd>Array of values, array of attribute metadata objects, or key-value map object matching the configured <b>Output Mode</b>.</dd>
+  </dl>
+</script>

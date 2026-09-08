@@ -1,0 +1,142 @@
+<script type="text/javascript">
+  (function() {
+    function initAssetPathAutocomplete(inputSelector, includeWildcards) {
+      var input = $(inputSelector);
+      if (!input.length) return;
+
+      var cachedPaths = null;
+      function fetchPaths(cb) {
+        if (cachedPaths !== null) return cb(cachedPaths);
+        $.getJSON("api/assets/hierarchy?populated=true", function(resp) {
+          var paths = [];
+          function collect(nodes) {
+            (nodes || []).forEach(function(n) {
+              var prefix = n.path || n.name;
+              (n.effectiveAttributes || []).forEach(function(attr) {
+                if (attr && attr.name) paths.push(prefix + "." + attr.name);
+              });
+              collect(n.children);
+            });
+          }
+          collect(resp.data || resp);
+          if (includeWildcards) {
+            paths.unshift("*");
+          }
+          cachedPaths = Array.from(new Set(paths));
+          cb(cachedPaths);
+        }).fail(function() {
+          $.getJSON("assets/hierarchy?populated=true", function(resp) {
+            var paths = [];
+            function collect(nodes) {
+              (nodes || []).forEach(function(n) {
+                var prefix = n.path || n.name;
+                (n.effectiveAttributes || []).forEach(function(attr) {
+                  if (attr && attr.name) paths.push(prefix + "." + attr.name);
+                });
+                collect(n.children);
+              });
+            }
+            collect(resp.data || resp);
+            if (includeWildcards) {
+              paths.unshift("*");
+            }
+            cachedPaths = Array.from(new Set(paths));
+            cb(cachedPaths);
+          });
+        });
+      }
+
+      input.autoComplete({
+        minLength: 0,
+        search: function(val, done) {
+          fetchPaths(function(allPaths) {
+            var query = (val || "").trim().toLowerCase();
+            var results = allPaths;
+            if (query) {
+              results = allPaths.filter(function(p) {
+                return p.toLowerCase().indexOf(query) !== -1;
+              });
+            }
+            if (typeof done === "function") {
+              done(results);
+            } else {
+              return results;
+            }
+          });
+        }
+      });
+    }
+
+    RED.nodes.registerType('kufayeka-asset-read', {
+      category: 'Asset Engine',
+      color: '#3B82F6',
+      defaults: {
+        name: { value: "" },
+        path: { value: "", required: false },
+        property: { value: "payload", required: true },
+        propertyType: { value: "msg" },
+        outputMode: { value: "value" }
+      },
+      inputs: 1,
+      outputs: 1,
+      icon: "font-awesome/fa-cube",
+      label: function() {
+        return this.name || (this.path ? "Read " + this.path : "Asset Read");
+      },
+      paletteLabel: "Asset Read",
+      oneditprepare: function() {
+        initAssetPathAutocomplete("#node-input-path", false);
+
+        $("#node-input-property").typedInput({
+          default: 'msg',
+          typeField: $("#node-input-propertyType"),
+          types: ['msg', 'flow', 'global']
+        });
+        $("#node-input-outputMode").typedInput({
+          types: [{
+            value: "outputMode",
+            options: [
+              { value: "value", label: "Value only (primitive / JSON)" },
+              { value: "attribute", label: "Attribute object (with timestamp & unit)" },
+              { value: "query", label: "Full Query Match Array" }
+            ]
+          }]
+        });
+      }
+    });
+  })();
+</script>
+
+<script type="text/html" data-template-name="kufayeka-asset-read">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Name">
+  </div>
+  <div class="form-row">
+    <label for="node-input-path"><i class="fa fa-cubes"></i> Asset Path</label>
+    <input type="text" id="node-input-path" placeholder="e.g. Plant1.Line1.Motor1.Speed (search autocomplete or leave blank for msg.assetPath)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-property"><i class="fa fa-arrow-right"></i> Target Property</label>
+    <input type="text" id="node-input-property" style="width:70%;">
+    <input type="hidden" id="node-input-propertyType">
+  </div>
+  <div class="form-row">
+    <label for="node-input-outputMode"><i class="fa fa-list"></i> Output Mode</label>
+    <input type="text" id="node-input-outputMode" style="width:70%;">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-asset-read">
+  <p>Reads an attribute value or query match from the Kufayeka in-memory Asset Engine hierarchy.</p>
+  <h3>Inputs</h3>
+  <dl class="message-properties">
+    <dt class="optional">assetPath <span class="property-type">string</span></dt>
+    <dd>Dynamic asset path override (e.g. <code>Plant1.Line1.Motor1.Speed</code>).</dd>
+  </dl>
+  <h3>Outputs</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">any</span></dt>
+    <dd>The retrieved attribute value, metadata object, or query match array.</dd>
+  </dl>
+</script>
