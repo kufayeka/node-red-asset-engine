@@ -46,6 +46,26 @@ Or install via Node-RED Palette Manager.
 
 ---
 
+## 🔗 Integration with Nexa Dashboard (`@kufayeka/node-red-nexa-dashboard`)
+
+Nexa Dashboard (the drag-drop HMI/SCADA screen builder plugin in this same monorepo)
+links to this engine **in-process**, via the exported `getAssetController(RED)` escape
+hatch in `lib/asset-plugin.js` — never through `RED.asset` directly, since every
+Node-RED plugin gets its own fresh `RED` API object and a plain property assignment like
+`RED.asset = asset` would only ever be visible to the plugin that set it.
+
+**Current status, stated plainly:** Nexa's backend subscribes once to this engine's
+`subscribe(...)` change stream and republishes every change over
+`RED.comms.publish("nexa/value", meta)` for potential live-preview use in the editor.
+Nothing currently *consumes* that channel — there is no picker UI yet for binding a Nexa
+component property to an asset tag path, even though the component contract already
+reserves a `bindable` field for exactly that purpose. If you're looking for "does this
+already stream a Modbus/OPC-UA tag live into an HMI screen" — not yet; see Nexa
+Dashboard's own README, §10 (Known Limitations & Roadmap), for the accurate state of that
+integration and what a straightforward next step looks like.
+
+---
+
 ## 🧪 Running Tests
 
 ```bash
