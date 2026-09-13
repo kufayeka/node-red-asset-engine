@@ -1,0 +1,55 @@
+<script type="text/javascript">
+  RED.nodes.registerType('kufayeka-sparkplug-edge-node', {
+    category: 'config',
+    defaults: {
+      name: { value: "" },
+      brokerUrl: { value: "mqtt://localhost:1883", required: true },
+      groupId: { value: "Kufayeka", required: true },
+      edgeNodeId: { value: "", required: true }
+    },
+    credentials: {
+      username: { type: "text" },
+      password: { type: "password" }
+    },
+    label: function () {
+      return this.name || (this.groupId + "/" + this.edgeNodeId) || "Sparkplug Edge Node";
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="kufayeka-sparkplug-edge-node">
+  <div class="form-row">
+    <label for="node-config-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-config-input-name" placeholder="Sparkplug Edge Node">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-brokerUrl"><i class="fa fa-server"></i> Broker URL</label>
+    <input type="text" id="node-config-input-brokerUrl" placeholder="mqtt://localhost:1883">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-username"><i class="fa fa-user"></i> Username</label>
+    <input type="text" id="node-config-input-username" placeholder="(optional)">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-password"><i class="fa fa-lock"></i> Password</label>
+    <input type="password" id="node-config-input-password" placeholder="(optional)">
+  </div>
+  <hr>
+  <div class="form-row">
+    <label for="node-config-input-groupId"><i class="fa fa-object-group"></i> Group ID</label>
+    <input type="text" id="node-config-input-groupId" placeholder="Kufayeka">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-edgeNodeId"><i class="fa fa-microchip"></i> Edge Node ID</label>
+    <input type="text" id="node-config-input-edgeNodeId" placeholder="e.g. AssetEngine1">
+  </div>
+  <div class="form-tips">
+    <p>Publishes this Node-RED instance's whole asset tree onto the Sparkplug B
+    namespace <code>spBv1.0/&lt;Group ID&gt;/.../&lt;Edge Node ID&gt;</code> — one
+    Sparkplug <b>Device</b> per top-level asset, one <b>Metric</b> per attribute
+    underneath it. Any Sparkplug client (an HMI, a protocol gateway, another
+    Node-RED instance) can write a value back by publishing a Device/Node
+    Command (DCMD/NCMD) — it's applied the same way an internal
+    <code>asset-write</code> node would.</p>
+  </div>
+</script>

@@ -7,7 +7,9 @@
     "test": "mocha \"test/**/*_spec.js\""
   },
   "dependencies": {
-    "cronosjs": "^1.7.1"
+    "cronosjs": "^1.7.1",
+    "mqtt": "^5.15.2",
+    "protobufjs": "^8.8.0"
   },
   "node-red": {
     "version": ">=4.0.0",
@@ -24,7 +26,10 @@
       "kufayeka-asset-write": "nodes/asset-write.js",
       "kufayeka-asset-multi-write": "nodes/asset-multi-write.js",
       "kufayeka-asset-watch": "nodes/asset-watch.js",
-      "kufayeka-asset-function": "nodes/asset-function.js"
+      "kufayeka-asset-function": "nodes/asset-function.js",
+      "kufayeka-sparkplug-edge-node": "nodes/sparkplug-edge-node.js",
+      "kufayeka-sparkplug-status": "nodes/sparkplug-status.js",
+      "kufayeka-sparkplug-in": "nodes/sparkplug-in.js"
     }
   },
   "keywords": [

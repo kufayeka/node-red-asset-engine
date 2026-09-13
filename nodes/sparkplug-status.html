@@ -1,0 +1,46 @@
+<script type="text/javascript">
+  RED.nodes.registerType('kufayeka-sparkplug-status', {
+    category: 'Asset Engine',
+    color: '#c78a3a',
+    defaults: {
+      name: { value: "" },
+      edgeNode: { type: "kufayeka-sparkplug-edge-node", required: true }
+    },
+    inputs: 0,
+    outputs: 0,
+    icon: "font-awesome/fa-wifi",
+    paletteLabel: "Sparkplug Status",
+    label: function () {
+      return this.name || "Sparkplug Status";
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="kufayeka-sparkplug-status">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Sparkplug Status">
+  </div>
+  <div class="form-row">
+    <label for="node-input-edgeNode"><i class="fa fa-microchip"></i> Edge Node</label>
+    <input type="text" id="node-input-edgeNode">
+  </div>
+  <div class="form-tips">
+    <p>Drop this on any flow tab and pick (or create, via "Add new
+    sparkplug-edge-node...") the Edge Node config you want to watch. Its box
+    on the canvas mirrors that Edge Node's live MQTT connection status
+    (connecting / online / reconnecting / error) — the config node itself
+    doesn't otherwise show up anywhere.</p>
+  </div>
+</script>
+
+<script type="text/html" data-help-name="kufayeka-sparkplug-status">
+  <p>A visible status indicator for a <code>kufayeka-sparkplug-edge-node</code>
+  config node.</p>
+  <p>Config nodes (like the Sparkplug Edge Node) never appear on the canvas
+  or in the palette by themselves in Node-RED — this node is how you both
+  <b>create</b> one (via its edit dialog's "Edge Node" dropdown -&gt; "Add new
+  sparkplug-edge-node...") and <b>see</b> whether it's actually connected.</p>
+  <p>Has no inputs or outputs — it's purely a status display, one per Edge
+  Node you want visible on a flow tab.</p>
+</script>

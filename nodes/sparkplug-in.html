@@ -1,0 +1,62 @@
+<script type="text/javascript">
+  RED.nodes.registerType('kufayeka-sparkplug-in', {
+    category: 'Asset Engine',
+    color: '#a6bbcf',
+    defaults: {
+      name: { value: "" },
+      brokerUrl: { value: "mqtt://localhost:1883", required: true },
+      groupFilter: { value: "+" },
+      edgeNodeFilter: { value: "+" }
+    },
+    credentials: {
+      username: { type: "text" },
+      password: { type: "password" }
+    },
+    inputs: 0,
+    outputs: 1,
+    icon: "bridge.png",
+    label: function () {
+      return this.name || ("sparkplug in: " + this.groupFilter + "/" + this.edgeNodeFilter);
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="kufayeka-sparkplug-in">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Sparkplug In">
+  </div>
+  <div class="form-row">
+    <label for="node-input-brokerUrl"><i class="fa fa-server"></i> Broker URL</label>
+    <input type="text" id="node-input-brokerUrl" placeholder="mqtt://localhost:1883">
+  </div>
+  <div class="form-row">
+    <label for="node-input-username"><i class="fa fa-user"></i> Username</label>
+    <input type="text" id="node-input-username" placeholder="(optional)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
+    <input type="password" id="node-input-password" placeholder="(optional)">
+  </div>
+  <hr>
+  <div class="form-row">
+    <label for="node-input-groupFilter"><i class="fa fa-object-group"></i> Group ID</label>
+    <input type="text" id="node-input-groupFilter" placeholder="+ (any group)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-edgeNodeFilter"><i class="fa fa-microchip"></i> Edge Node ID</label>
+    <input type="text" id="node-input-edgeNodeFilter" placeholder="+ (any edge node)">
+  </div>
+  <div class="form-tips">
+    <p>Subscribes to <code>spBv1.0/&lt;Group ID&gt;/+/&lt;Edge Node ID&gt;[/+]</code> — every
+    NBIRTH/DBIRTH/NDATA/DDATA/NCMD/DCMD/NDEATH/DDEATH message matching the filters — decodes
+    each one and emits it as a message, for monitoring/debugging what's actually on the bus.
+    Leave Group ID / Edge Node ID as <code>+</code> to watch everything.</p>
+    <p><code>msg.sparkplug</code> carries the parsed topic (namespace, groupId, messageType,
+    edgeNodeId, deviceId). <code>msg.complianceIssues</code> is an array of plain-language
+    problems found in that one message (empty if none) — a handful of structural spec checks
+    (mandatory NBIRTH metrics, BIRTH seq reset, seq continuity, duplicate/missing metric names,
+    missing timestamp), <b>not</b> the full TCK. It does not check the STATE/Primary Host
+    handshake, DataSet/Template metrics, metric aliasing, or the full DataType matrix.</p>
+  </div>
+</script>
