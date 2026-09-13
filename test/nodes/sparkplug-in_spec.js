@@ -83,7 +83,7 @@ describe("kufayeka-sparkplug-in", function () {
     });
   });
 
-  it("flags a BIRTH message that doesn't reset seq to 0", function (done) {
+  it("flags an NBIRTH that doesn't reset seq to 0 (only NBIRTH resets -- see the DBIRTH tests below)", function (done) {
     loadNode({}, function () {
       var client = fakeMqtt.getLastFakeClient();
       client.simulateConnect();
@@ -94,8 +94,49 @@ describe("kufayeka-sparkplug-in", function () {
       });
 
       publishAndCapture(client, "spBv1.0/TestGroup/NBIRTH/Edge1", encoded, function (msg) {
-        msg.complianceIssues.should.containEql("a BIRTH message must reset seq to 0, got 5");
+        msg.complianceIssues.should.containEql("NBIRTH must reset seq to 0, got 5");
         done();
+      });
+    });
+  });
+
+  it("does NOT flag a DBIRTH for continuing the seq counter instead of resetting to 0 (real bug: DBIRTH is NOT required to reset, only NBIRTH is)", function (done) {
+    loadNode({}, function () {
+      var client = fakeMqtt.getLastFakeClient();
+      client.simulateConnect();
+
+      var nbirth = codec.encodePayload({
+        timestamp: Date.now(), seq: 0,
+        metrics: [{ name: "bdSeq", type: "Int64", value: 1 }, { name: "Node Control/Rebirth", type: "Boolean", value: false }]
+      });
+      publishAndCapture(client, "spBv1.0/TestGroup/NBIRTH/Edge1", nbirth, function () {
+        // [tck-id-topics-dbirth-seq]/[tck-id-payloads-dbirth-seq-inc] (spec
+        // p.32, p.92): a DBIRTH's seq "MUST have a value of one greater
+        // than the previous MQTT message" -- i.e. 1 here, NOT 0.
+        var dbirth = codec.encodePayload({ timestamp: Date.now(), seq: 1, metrics: [{ name: "Speed", type: "Double", value: 1 }] });
+        publishAndCapture(client, "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1", dbirth, function (msg) {
+          msg.complianceIssues.should.be.empty();
+          done();
+        });
+      });
+    });
+  });
+
+  it("flags a DBIRTH whose seq doesn't continue from the prior NBIRTH", function (done) {
+    loadNode({}, function () {
+      var client = fakeMqtt.getLastFakeClient();
+      client.simulateConnect();
+
+      var nbirth = codec.encodePayload({
+        timestamp: Date.now(), seq: 0,
+        metrics: [{ name: "bdSeq", type: "Int64", value: 1 }, { name: "Node Control/Rebirth", type: "Boolean", value: false }]
+      });
+      publishAndCapture(client, "spBv1.0/TestGroup/NBIRTH/Edge1", nbirth, function () {
+        var dbirth = codec.encodePayload({ timestamp: Date.now(), seq: 9, metrics: [{ name: "Speed", type: "Double", value: 1 }] });
+        publishAndCapture(client, "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1", dbirth, function (msg) {
+          msg.complianceIssues.should.containEql("seq gap: expected 1 but got 9 (a message for this edge node may have been lost or delivered out of order)");
+          done();
+        });
       });
     });
   });
@@ -114,6 +155,54 @@ describe("kufayeka-sparkplug-in", function () {
           msg2.complianceIssues.should.containEql("seq gap: expected 2 but got 9 (a message for this edge node may have been lost or delivered out of order)");
           done();
         });
+      });
+    });
+  });
+
+  it("does NOT flag an NDEATH for lacking a seq (NDEATH must NOT include one)", function (done) {
+    loadNode({}, function () {
+      var client = fakeMqtt.getLastFakeClient();
+      client.simulateConnect();
+      var encoded = codec.encodePayload({ timestamp: Date.now(), metrics: [{ name: "bdSeq", type: "Int64", value: 1 }] });
+      publishAndCapture(client, "spBv1.0/TestGroup/NDEATH/Edge1", encoded, function (msg) {
+        msg.complianceIssues.should.be.empty();
+        done();
+      });
+    });
+  });
+
+  it("flags a DDEATH that's missing its required seq (unlike NDEATH, DDEATH MUST include one)", function (done) {
+    loadNode({}, function () {
+      var client = fakeMqtt.getLastFakeClient();
+      client.simulateConnect();
+      var encoded = codec.encodePayload({ timestamp: Date.now(), metrics: [] });
+      publishAndCapture(client, "spBv1.0/TestGroup/DDEATH/Edge1/Plant1", encoded, function (msg) {
+        msg.complianceIssues.should.containEql("DDEATH is missing its required sequence number");
+        done();
+      });
+    });
+  });
+
+  it("flags an NCMD that incorrectly carries a seq number (NCMD/DCMD MUST NOT include one)", function (done) {
+    loadNode({}, function () {
+      var client = fakeMqtt.getLastFakeClient();
+      client.simulateConnect();
+      var encoded = codec.encodePayload({ timestamp: Date.now(), seq: 3, metrics: [{ name: "Node Control/Rebirth", type: "Boolean", value: true }] });
+      publishAndCapture(client, "spBv1.0/TestGroup/NCMD/Edge1", encoded, function (msg) {
+        msg.complianceIssues.should.containEql("NCMD messages MUST NOT include a sequence number, but one was present");
+        done();
+      });
+    });
+  });
+
+  it("flags a DATA message missing its required seq entirely", function (done) {
+    loadNode({}, function () {
+      var client = fakeMqtt.getLastFakeClient();
+      client.simulateConnect();
+      var encoded = codec.encodePayload({ timestamp: Date.now(), metrics: [{ name: "Speed", type: "Double", value: 1 }] });
+      publishAndCapture(client, "spBv1.0/TestGroup/DDATA/Edge1/Plant1", encoded, function (msg) {
+        msg.complianceIssues.should.containEql("DDATA is missing its required sequence number");
+        done();
       });
     });
   });

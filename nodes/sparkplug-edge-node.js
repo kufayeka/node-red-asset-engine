@@ -10,6 +10,22 @@ const {
 
 const NAMESPACE = "spBv1.0";
 
+// [tck-id-topic-structure-namespace-valid-group-id] / [-valid-edge-node-id]:
+// "The format of the Group ID [or edge_node_id] MUST be a valid UTF-8
+// string with the exception of the reserved characters of + (plus), /
+// (forward slash), and # (number sign)." (spec §4.1.2/§4.1.4, p.18-19).
+// Using any of these silently corrupts the topic (an extra "/" splits into
+// a phantom segment, "+"/"#" collide with MQTT's own wildcard syntax on
+// subscribe) — so this is checked eagerly at config time rather than
+// discovered later as "Ignition can't see my data".
+var RESERVED_SPARKPLUG_ID_CHARS = /[+/#]/;
+function invalidSparkplugIdReason(value, label) {
+  if (RESERVED_SPARKPLUG_ID_CHARS.test(value)) {
+    return label + " \"" + value + "\" contains a reserved Sparkplug character (+, /, or #) — see spec §4.1.2/§4.1.4.";
+  }
+  return null;
+}
+
 // `err.message` alone was showing up completely EMPTY in practice (a real
 // user-reported "Sparkplug MQTT error:" with nothing after the colon) —
 // some errors the `mqtt` package (or Node's own net/tls layer underneath
@@ -42,6 +58,12 @@ module.exports = function (RED) {
     var brokerUrl = config.brokerUrl || "mqtt://localhost:1883";
     var username = node.credentials && node.credentials.username;
     var password = node.credentials && node.credentials.password;
+    // Optional — spec §3.5/§5.4 (p.16, p.35-36): "Specifying a Primary Host
+    // is not required for an Edge Node. But it is often desired." Blank
+    // (the default) preserves the original always-birth-immediately
+    // behavior exactly.
+    var primaryHostId = (config.primaryHostId || "").trim();
+    var primaryHostStateTopic = primaryHostId ? (NAMESPACE + "/STATE/" + primaryHostId) : null;
 
     var asset = RED.asset || getAssetController(RED);
     if (!asset) {
@@ -71,6 +93,26 @@ module.exports = function (RED) {
     var client = null;
     var unsubscribeAssetChanges = null;
     var closing = false;
+    // true whenever this Edge Node has not yet (re-)confirmed its configured
+    // Primary Host is online — while true, publishBirth()/onAssetChange()
+    // must not publish anything (spec §5.4, p.35-36: the Edge Node "must
+    // wait until the Primary Host Application is online... before the Edge
+    // Node publishes its NBIRTH and DBIRTH messages"). Stays permanently
+    // false when no primaryHostId is configured.
+    var waitingForPrimaryHost = !!primaryHostId;
+    var primaryHostOnline = false;
+    var primaryHostLastTs = null;
+    // Set while this node itself is tearing down and reconnecting in
+    // response to its Primary Host going offline (§16/handlePrimaryHostState)
+    // — distinguishes that self-inflicted, expected "close" event from a
+    // real unexpected disconnect, the same way `closing` distinguishes a
+    // real Node-RED shutdown from one.
+    var restartingForPrimaryHost = false;
+    // Tracks which top-level assets ("Devices") have already been BIRTHed
+    // in the current session, so a later schema change can tell a newly
+    // added asset (needs a fresh DBIRTH) apart from a removed one (needs a
+    // DDEATH) — see reconcileDevices().
+    var knownDevices = {};
 
     // A config node has no box of its own on the canvas, so its status is
     // otherwise invisible — re-emitted as an event so a companion
@@ -96,6 +138,7 @@ module.exports = function (RED) {
     }
 
     function publishBirth() {
+      waitingForPrimaryHost = false;
       seq = 0; // NBIRTH always resets the sequence counter, per spec
       var nbirth = sparkplug.encodePayload({
         timestamp: Date.now(),
@@ -117,20 +160,83 @@ module.exports = function (RED) {
       client.publish(nodeBirthTopic, nbirth, { qos: 0, retain: false });
 
       var hierarchy = asset.getHierarchy({ populateAttributes: true }) || [];
+      knownDevices = {};
       hierarchy.forEach(function (rootNode) {
-        var dbirthTopic = NAMESPACE + "/" + node.groupId + "/DBIRTH/" + node.edgeNodeId + "/" + rootNode.name;
-        var payload = sparkplug.encodePayload({
-          timestamp: Date.now(),
-          seq: nextSeq(),
-          metrics: collectDeviceMetrics(rootNode)
-        });
-        client.publish(dbirthTopic, payload, { qos: 0, retain: false });
+        publishDeviceBirth(rootNode);
+        knownDevices[rootNode.name] = true;
       });
       setStatus({ fill: "green", shape: "dot", text: "online (" + hierarchy.length + " device" + (hierarchy.length === 1 ? "" : "s") + ")" });
     }
 
+    // [tck-id-message-flow-device-birth-publish-nbirth-wait]: "A Device can
+    // publish a DBIRTH as long as an NBIRTH has been sent previously and the
+    // MQTT session is active" — a Device is explicitly allowed to birth
+    // mid-session, not only right after the Edge Node's own NBIRTH. This is
+    // what lets reconcileDevices() below birth a newly-added top-level asset
+    // immediately, instead of waiting for the next reconnect/rebirth.
+    function publishDeviceBirth(rootNode) {
+      // Unlike Group ID/Edge Node ID (fixed at config time, checked once at
+      // connect() below), a Device ID comes from a live asset name the user
+      // can rename at any time — checked here, per publish, as a best-effort
+      // warning rather than a refusal: an already-malformed name shouldn't
+      // newly break a deploy that previously "worked" (just badly).
+      var deviceIdError = invalidSparkplugIdReason(rootNode.name, "Device ID");
+      if (deviceIdError) node.warn("Sparkplug: " + deviceIdError + " Its topic will be malformed.");
+      var dbirthTopic = NAMESPACE + "/" + node.groupId + "/DBIRTH/" + node.edgeNodeId + "/" + rootNode.name;
+      var payload = sparkplug.encodePayload({
+        timestamp: Date.now(),
+        seq: nextSeq(),
+        metrics: collectDeviceMetrics(rootNode)
+      });
+      client.publish(dbirthTopic, payload, { qos: 0, retain: false });
+    }
+
+    // Spec §6.4.26 DDEATH (p.94): "The DDEATH messages are published by an
+    // Edge Node on behalf of an attached device. If the Edge Node determines
+    // that a device is no longer accessible... the Edge Node should publish
+    // a DDEATH." Here, "no longer accessible" == removed from the deployed
+    // asset schema (a re-applied kufayeka-asset-schema no longer lists it as
+    // a top-level asset) — this Edge Node has no other notion of a Device
+    // going offline independently of the whole Node.
+    function publishDeviceDeath(deviceName) {
+      var ddeathTopic = NAMESPACE + "/" + node.groupId + "/DDEATH/" + node.edgeNodeId + "/" + deviceName;
+      // [tck-id-payloads-ddeath-seq]/[-seq-inc]: DDEATH DOES participate in
+      // the shared node-wide seq counter (unlike NDEATH, which must NOT
+      // include one at all) — see nextSeq().
+      var payload = sparkplug.encodePayload({ timestamp: Date.now(), seq: nextSeq(), metrics: [] });
+      client.publish(ddeathTopic, payload, { qos: 0, retain: false });
+    }
+
+    // Diffs the CURRENT top-level asset list against knownDevices (as of
+    // the last birth or reconciliation): a newly-appeared one gets an
+    // immediate DBIRTH, a since-vanished one gets a DDEATH. Triggered off
+    // "schema.applied" change events (see onAssetChange) — a schema re-apply
+    // is the only way the top-level asset list can change at runtime.
+    function reconcileDevices() {
+      if (!client || !client.connected || waitingForPrimaryHost) return;
+      var hierarchy = asset.getHierarchy({ populateAttributes: true }) || [];
+      var current = {};
+      hierarchy.forEach(function (rootNode) { current[rootNode.name] = rootNode; });
+
+      Object.keys(knownDevices).forEach(function (name) {
+        if (!Object.prototype.hasOwnProperty.call(current, name)) {
+          publishDeviceDeath(name);
+          delete knownDevices[name];
+        }
+      });
+      Object.keys(current).forEach(function (name) {
+        if (!Object.prototype.hasOwnProperty.call(knownDevices, name)) {
+          publishDeviceBirth(current[name]);
+          knownDevices[name] = true;
+        }
+      });
+    }
+
     function onAssetChange(meta) {
-      if (!client || !client.connected) return;
+      if (!client || !client.connected || waitingForPrimaryHost) return;
+      if (meta && meta.change && meta.change.type === "schema.applied") {
+        reconcileDevices();
+      }
       var changes = (meta && meta.change && meta.change.changes) || [];
       if (!changes.length) return;
       // One bulk write (setAttributes/applySchema) can touch several
@@ -175,7 +281,84 @@ module.exports = function (RED) {
       }
     }
 
+    // Publishes NDEATH (best-effort — waits up to 1.5s for the PUBACK, then
+    // gives up rather than hanging) and then always runs `afterEnd`. Shared
+    // by the node's own graceful-shutdown close handler and by
+    // handlePrimaryHostState()'s spec-mandated "Primary Host went offline"
+    // restart below — both need the exact same "tell the bus we're gone,
+    // but don't wait forever" behavior.
+    function publishDeathThenEnd(afterEnd) {
+      var finished = false;
+      function finish() {
+        if (finished) return;
+        finished = true;
+        afterEnd();
+      }
+      if (!client.connected) { finish(); return; }
+      var graceTimer = setTimeout(finish, 1500);
+      client.publish(nodeDeathTopic, deathPayloadBuffer(), { qos: 1 }, function () {
+        clearTimeout(graceTimer);
+        finish();
+      });
+    }
+
+    // Spec §5.4 (p.36-37), the optional Primary Host mechanism: while
+    // waiting to birth, a STATE online=true confirmation lets the deferred
+    // birth proceed; once birthed, a STATE online=false MUST immediately
+    // NDEATH and restart the whole connection process from scratch (a fresh
+    // session will re-verify Primary Host state before re-birthing).
+    function handlePrimaryHostState(buf) {
+      var state;
+      try {
+        state = JSON.parse(buf.toString());
+      } catch (e) {
+        node.warn("Sparkplug: failed to parse Primary Host STATE payload on \"" + primaryHostStateTopic + "\": " + describeError(e));
+        return;
+      }
+      var ts = typeof state.timestamp === "number" ? state.timestamp : null;
+      var online = state.online === true;
+
+      // [tck-id-message-flow-edge-node-birth-publish-phid-wait-timestamp]:
+      // ignore a STATE message older than the last one accepted -- unless
+      // none has been accepted yet, in which case this one is unconditionally
+      // the latest/valid one.
+      if (primaryHostLastTs !== null && ts !== null && ts < primaryHostLastTs) return;
+      if (ts !== null) primaryHostLastTs = ts;
+
+      if (online) {
+        primaryHostOnline = true;
+        if (waitingForPrimaryHost) {
+          try {
+            publishBirth();
+          } catch (e) {
+            node.warn("Sparkplug: failed to publish birth after Primary Host came online: " + describeError(e));
+          }
+        }
+        return;
+      }
+
+      primaryHostOnline = false;
+      if (waitingForPrimaryHost) return; // already waiting -- nothing new to do
+
+      // [tck-id-message-flow-edge-node-birth-publish-phid-offline]: "it MUST
+      // immediately publish an NDEATH message and disconnect from the MQTT
+      // Server and start the connection establishment process over."
+      waitingForPrimaryHost = true;
+      restartingForPrimaryHost = true;
+      setStatus({ fill: "yellow", shape: "ring", text: "primary host \"" + primaryHostId + "\" offline, restarting session" });
+      publishDeathThenEnd(function () {
+        client.end(true, {}, function () {
+          restartingForPrimaryHost = false;
+          connect();
+        });
+      });
+    }
+
     function onMessage(topic, buf) {
+      if (primaryHostStateTopic && topic === primaryHostStateTopic) {
+        handlePrimaryHostState(buf);
+        return;
+      }
       var parts = topic.split("/");
       if (parts[0] !== NAMESPACE || parts[1] !== node.groupId) return;
       var msgType = parts[2];
@@ -239,23 +422,42 @@ module.exports = function (RED) {
 
       client.on("connect", function () {
         node.log("Sparkplug Edge Node \"" + node.edgeNodeId + "\" connected to " + brokerUrl);
-        try {
-          publishBirth();
-        } catch (e) {
-          // An uncaught throw HERE (e.g. sparkplugCodec's encodePayload
-          // rejecting a malformed metric via Payload.verify()) would
-          // otherwise escape as an uncaught exception inside this "connect"
-          // handler — which doesn't cleanly surface as an MQTT "error"
-          // event, so without this it just silently corrupts the birth
-          // sequence instead of being visible anywhere.
-          node.warn("Sparkplug: failed to publish birth: " + describeError(e));
+
+        var subscribeTopics = [nodeCmdTopic, deviceCmdTopicFilter];
+        if (primaryHostId) {
+          // Every fresh session re-verifies Primary Host state from
+          // scratch, even across a reconnect — [tck-id-message-flow-edge-
+          // node-birth-publish-phid-wait]: MUST verify via STATE before
+          // publishing NBIRTH/DBIRTH. STATE is published retained (spec
+          // §6.4.27), so in the common case this resolves in one round trip.
+          waitingForPrimaryHost = true;
+          primaryHostOnline = false;
+          subscribeTopics = [primaryHostStateTopic].concat(subscribeTopics);
+          setStatus({ fill: "yellow", shape: "ring", text: "waiting for primary host \"" + primaryHostId + "\"" });
         }
-        client.subscribe([nodeCmdTopic, deviceCmdTopicFilter], { qos: 1 }, function (err) {
+
+        client.subscribe(subscribeTopics, { qos: 1 }, function (err) {
           if (err) node.warn("Sparkplug: failed to subscribe to command topics: " + describeError(err));
         });
         if (!unsubscribeAssetChanges) {
           unsubscribeAssetChanges = asset.subscribe(onAssetChange);
         }
+
+        if (!primaryHostId) {
+          try {
+            publishBirth();
+          } catch (e) {
+            // An uncaught throw HERE (e.g. sparkplugCodec's encodePayload
+            // rejecting a malformed metric via Payload.verify()) would
+            // otherwise escape as an uncaught exception inside this "connect"
+            // handler — which doesn't cleanly surface as an MQTT "error"
+            // event, so without this it just silently corrupts the birth
+            // sequence instead of being visible anywhere.
+            node.warn("Sparkplug: failed to publish birth: " + describeError(e));
+          }
+        }
+        // else: publishBirth() is deferred until handlePrimaryHostState()
+        // confirms the configured Primary Host is online.
       });
       client.on("message", onMessage);
       client.on("reconnect", function () {
@@ -275,7 +477,7 @@ module.exports = function (RED) {
         setStatus({ fill: "yellow", shape: "ring", text: "reconnecting" });
       });
       client.on("close", function () {
-        if (!closing) {
+        if (!closing && !restartingForPrimaryHost) {
           setStatus({ fill: "red", shape: "ring", text: "disconnected" });
           node.warn("Sparkplug: MQTT connection closed (client will auto-reconnect)");
         }
@@ -286,7 +488,17 @@ module.exports = function (RED) {
       });
     }
 
-    connect();
+    // [tck-id-topic-structure-namespace-valid-group-id] / [-valid-edge-node-
+    // id]: fail fast on a Group/Edge Node ID that would silently produce a
+    // broken topic, rather than connecting anyway and leaving "why can't
+    // Ignition see my data" as a mystery.
+    var configIdError = invalidSparkplugIdReason(node.groupId, "Group ID") || invalidSparkplugIdReason(node.edgeNodeId, "Edge Node ID");
+    if (configIdError) {
+      node.error("Sparkplug: " + configIdError + " Refusing to connect.");
+      setStatus({ fill: "red", shape: "ring", text: "invalid Group ID / Edge Node ID" });
+    } else {
+      connect();
+    }
 
     node.on("close", function (done) {
       closing = true;
@@ -295,45 +507,16 @@ module.exports = function (RED) {
         unsubscribeAssetChanges = null;
       }
       if (!client) { done(); return; }
-
-      var finished = false;
-      function finish() {
-        if (finished) return;
-        finished = true;
+      // Covers the real reported race too: an in-process/embedded broker
+      // node (or the real broker) can vanish in the SAME "Stopping flows"
+      // pass this node's own close handler runs in, sometimes microseconds
+      // earlier — publishDeathThenEnd() already skips the doomed publish
+      // when that's already happened (see its own !client.connected check).
+      publishDeathThenEnd(function () {
         // force=true: don't wait for any in-flight packet to ack — by this
         // point we've either gotten our NDEATH ack already or given up on
         // it, so there's nothing left worth a graceful drain.
         client.end(true, {}, function () { done(); });
-      }
-
-      // If the broker connection is already gone (a very real race: an
-      // in-process/embedded broker node — or the real broker — can vanish
-      // in the SAME "Stopping flows" pass this node's own close handler
-      // runs in, sometimes microseconds earlier), there is no live session
-      // to gracefully tell anything to, and `mqtt` is almost certainly
-      // already spinning on its own auto-reconnect (ECONNREFUSED every
-      // `reconnectPeriod`). Waiting on a publish() ack that can now never
-      // arrive is exactly what caused the observed "Close timed out" hang
-      // and endless ECONNREFUSED spam after Ctrl+C — so skip straight to
-      // ending the client instead of trying to publish through a
-      // connection that isn't there.
-      if (!client.connected) {
-        finish();
-        return;
-      }
-
-      // A graceful shutdown publishes NDEATH itself (qos 1, "at least once")
-      // rather than leaving it purely to the broker's Will delivery — the
-      // Will only fires on an UNGRACEFUL drop, so this covers the
-      // "Node-RED was deployed/stopped cleanly" case too. But don't wait
-      // forever for the PUBACK: if the connection drops mid-publish (the
-      // same race as above, just a beat later), fall back to ending
-      // anyway after a short grace period rather than hanging until
-      // Node-RED's own close-timeout kills this handler.
-      var graceTimer = setTimeout(finish, 1500);
-      client.publish(nodeDeathTopic, deathPayloadBuffer(), { qos: 1 }, function () {
-        clearTimeout(graceTimer);
-        finish();
       });
     });
   }

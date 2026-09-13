@@ -1,0 +1,71 @@
+<script type="text/javascript">
+  RED.nodes.registerType('kufayeka-sparkplug-out', {
+    category: 'Asset Engine',
+    color: '#a6bbcf',
+    defaults: {
+      name: { value: "" },
+      brokerUrl: { value: "mqtt://localhost:1883", required: true },
+      groupId: { value: "" },
+      edgeNodeId: { value: "" },
+      deviceId: { value: "" }
+    },
+    credentials: {
+      username: { type: "text" },
+      password: { type: "password" }
+    },
+    inputs: 1,
+    outputs: 1,
+    icon: "bridge.png",
+    label: function () {
+      return this.name || ("sparkplug out: " + (this.edgeNodeId || "(msg.sparkplug)"));
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="kufayeka-sparkplug-out">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name" placeholder="Sparkplug Out">
+  </div>
+  <div class="form-row">
+    <label for="node-input-brokerUrl"><i class="fa fa-server"></i> Broker URL</label>
+    <input type="text" id="node-input-brokerUrl" placeholder="mqtt://localhost:1883">
+  </div>
+  <div class="form-row">
+    <label for="node-input-username"><i class="fa fa-user"></i> Username</label>
+    <input type="text" id="node-input-username" placeholder="(optional)">
+  </div>
+  <div class="form-row">
+    <label for="node-input-password"><i class="fa fa-lock"></i> Password</label>
+    <input type="password" id="node-input-password" placeholder="(optional)">
+  </div>
+  <hr>
+  <div class="form-row">
+    <label for="node-input-groupId"><i class="fa fa-object-group"></i> Group ID</label>
+    <input type="text" id="node-input-groupId" placeholder="default target Group ID">
+  </div>
+  <div class="form-row">
+    <label for="node-input-edgeNodeId"><i class="fa fa-microchip"></i> Edge Node ID</label>
+    <input type="text" id="node-input-edgeNodeId" placeholder="default target Edge Node ID">
+  </div>
+  <div class="form-row">
+    <label for="node-input-deviceId"><i class="fa fa-cube"></i> Device ID</label>
+    <input type="text" id="node-input-deviceId" placeholder="(optional) default target Device — leave blank for node-scoped (NCMD)">
+  </div>
+  <div class="form-tips">
+    <p>Publishes an NCMD (no Device configured/given) or DCMD (Device configured/given) to a
+    Sparkplug Edge Node — this is a <b>writer</b> node, playing the role a Sparkplug Host
+    Application or protocol gateway normally plays. It never publishes NBIRTH/DBIRTH/DDATA.</p>
+    <p>Per-message target overrides: set <code>msg.sparkplug = {groupId, edgeNodeId, deviceId}</code>
+    to override this node's configured defaults.</p>
+    <p>What to publish:</p>
+    <ul>
+      <li><code>msg.command = "rebirth"</code> — sends the standard <code>Node Control/Rebirth</code>
+      request (always node-scoped, via NCMD).</li>
+      <li><code>msg.metrics = [{name, type, value}, ...]</code> — one or more metrics.</li>
+      <li><code>msg.payload = {name, type, value}</code> — shorthand for a single metric.</li>
+    </ul>
+    <p>On success, forwards <code>msg</code> with <code>msg.sparkplug</code> filled in (the exact
+    topic and message type that were published) so it can be logged/chained.</p>
+  </div>
+</script>

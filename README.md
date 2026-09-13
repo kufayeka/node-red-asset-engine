@@ -30,6 +30,9 @@
   - `kufayeka-asset-watch`
   - `kufayeka-asset-function`
   - `kufayeka-inject` & `kufayeka-trigger-schedule`
+  - `kufayeka-sparkplug-edge-node`, `kufayeka-sparkplug-status` & `kufayeka-sparkplug-in`
+    (MQTT Sparkplug B — see **[SPARKPLUG.md](SPARKPLUG.md)** for architecture, message-flow
+    diagrams, and a line-by-line spec compliance table)
 
 ---
 

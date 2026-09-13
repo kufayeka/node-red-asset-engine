@@ -29,7 +29,8 @@
       "kufayeka-asset-function": "nodes/asset-function.js",
       "kufayeka-sparkplug-edge-node": "nodes/sparkplug-edge-node.js",
       "kufayeka-sparkplug-status": "nodes/sparkplug-status.js",
-      "kufayeka-sparkplug-in": "nodes/sparkplug-in.js"
+      "kufayeka-sparkplug-in": "nodes/sparkplug-in.js",
+      "kufayeka-sparkplug-out": "nodes/sparkplug-out.js"
     }
   },
   "keywords": [

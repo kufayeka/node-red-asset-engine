@@ -5,7 +5,8 @@
       name: { value: "" },
       brokerUrl: { value: "mqtt://localhost:1883", required: true },
       groupId: { value: "Kufayeka", required: true },
-      edgeNodeId: { value: "", required: true }
+      edgeNodeId: { value: "", required: true },
+      primaryHostId: { value: "" }
     },
     credentials: {
       username: { type: "text" },
@@ -43,6 +44,10 @@
     <label for="node-config-input-edgeNodeId"><i class="fa fa-microchip"></i> Edge Node ID</label>
     <input type="text" id="node-config-input-edgeNodeId" placeholder="e.g. AssetEngine1">
   </div>
+  <div class="form-row">
+    <label for="node-config-input-primaryHostId"><i class="fa fa-shield"></i> Primary Host ID</label>
+    <input type="text" id="node-config-input-primaryHostId" placeholder="(optional) e.g. Ignition">
+  </div>
   <div class="form-tips">
     <p>Publishes this Node-RED instance's whole asset tree onto the Sparkplug B
     namespace <code>spBv1.0/&lt;Group ID&gt;/.../&lt;Edge Node ID&gt;</code> — one
@@ -51,5 +56,11 @@
     Node-RED instance) can write a value back by publishing a Device/Node
     Command (DCMD/NCMD) — it's applied the same way an internal
     <code>asset-write</code> node would.</p>
+    <p><b>Primary Host ID</b> is optional. If set, this Edge Node subscribes to
+    <code>spBv1.0/STATE/&lt;Primary Host ID&gt;</code> and waits for that Host to
+    report itself online before publishing NBIRTH/DBIRTH — and if that Host later
+    goes offline, immediately publishes NDEATH and restarts the whole connection.
+    Leave it blank (the default) to birth immediately on every connect, without
+    waiting for any specific Host Application.</p>
   </div>
 </script>

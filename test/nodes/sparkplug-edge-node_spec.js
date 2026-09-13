@@ -232,6 +232,152 @@ describe("kufayeka-sparkplug-edge-node", function () {
     });
   });
 
+  describe("Primary Host STATE handshake (optional, spec §5.4)", function () {
+    it("defers NBIRTH/DBIRTH until the configured Primary Host STATE says online=true", function (done) {
+      loadEdgeNode({ primaryHostId: "Ignition" }, function () {
+        setupAssets(helper._RED);
+        var client = fakeMqtt.getLastFakeClient();
+        client.simulateConnect();
+
+        client.published.should.be.empty(); // still waiting -- nothing birthed yet
+        client.subscriptions[0].should.containEql("spBv1.0/STATE/Ignition");
+
+        client.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: true, timestamp: 1 })));
+
+        var topics = client.published.map(function (p) { return p.topic; });
+        topics.should.containEql("spBv1.0/TestGroup/NBIRTH/Edge1");
+        topics.should.containEql("spBv1.0/TestGroup/DBIRTH/Edge1/Plant1");
+        done();
+      });
+    });
+
+    it("immediately NDEATHs and restarts the whole connection when the Primary Host goes offline after being online", function (done) {
+      loadEdgeNode({ primaryHostId: "Ignition" }, function () {
+        setupAssets(helper._RED);
+        var firstClient = fakeMqtt.getLastFakeClient();
+        firstClient.simulateConnect();
+        firstClient.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: true, timestamp: 1 })));
+        firstClient.published = []; // only care about what happens after the birth now
+
+        firstClient.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: false, timestamp: 2 })));
+
+        var deaths = decodedPublishesOf(firstClient).filter(function (p) { return p.topic === "spBv1.0/TestGroup/NDEATH/Edge1"; });
+        deaths.length.should.equal(1);
+        firstClient.ended.should.equal(true);
+
+        // [tck-id-message-flow-edge-node-birth-publish-phid-offline]: "...
+        // start the connection establishment process over" -- a brand new
+        // client/session, which must wait for Primary Host confirmation
+        // again rather than assuming it's still online.
+        var secondClient = fakeMqtt.getLastFakeClient();
+        secondClient.should.not.equal(firstClient);
+        secondClient.simulateConnect();
+        secondClient.published.should.be.empty();
+        secondClient.subscriptions[0].should.containEql("spBv1.0/STATE/Ignition");
+        done();
+      });
+    });
+
+    it("ignores a stale STATE message older than the last one already accepted", function (done) {
+      loadEdgeNode({ primaryHostId: "Ignition" }, function () {
+        setupAssets(helper._RED);
+        var client = fakeMqtt.getLastFakeClient();
+        client.simulateConnect();
+
+        client.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: true, timestamp: 100 })));
+        client.published = [];
+        // An out-of-order, OLDER "offline" arriving after a newer "online"
+        // must be ignored -- otherwise a network reordering could bounce
+        // a perfectly healthy session.
+        client.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: false, timestamp: 50 })));
+
+        client.published.should.be.empty();
+        client.ended.should.equal(false);
+        done();
+      });
+    });
+  });
+
+  describe("dynamic per-Device DBIRTH/DDEATH on a schema re-apply (spec §5.6, §6.4.26)", function () {
+    function applySchemaWithTopLevelAssets(RED, assetNames) {
+      RED.asset.applySchema({
+        attributeTemplates: [{ id: "tmpl", name: "T", attributes: [{ name: "Status", valueType: "string", default: "OK" }] }],
+        assets: assetNames.map(function (name, i) {
+          return { id: "asset-" + i, name: name, parentId: null, templateIds: ["tmpl"], attributes: {} };
+        }),
+        historians: []
+      });
+    }
+
+    it("publishes a DBIRTH for a newly-added top-level asset via applySchema, without needing a reconnect", function (done) {
+      loadEdgeNode({}, function () {
+        pluginFactory(helper._RED);
+        applySchemaWithTopLevelAssets(helper._RED, ["Plant1"]);
+        var client = fakeMqtt.getLastFakeClient();
+        client.simulateConnect();
+        client.published = [];
+
+        applySchemaWithTopLevelAssets(helper._RED, ["Plant1", "Plant2"]);
+
+        var topics = client.published.map(function (p) { return p.topic; });
+        topics.should.containEql("spBv1.0/TestGroup/DBIRTH/Edge1/Plant2");
+        topics.should.not.containEql("spBv1.0/TestGroup/NBIRTH/Edge1"); // no reconnect/rebirth needed for this
+        done();
+      });
+    });
+
+    it("publishes a DDEATH (with a required seq number) for a top-level asset removed via applySchema", function (done) {
+      loadEdgeNode({}, function () {
+        pluginFactory(helper._RED);
+        applySchemaWithTopLevelAssets(helper._RED, ["Plant1", "Plant2"]);
+        var client = fakeMqtt.getLastFakeClient();
+        client.simulateConnect();
+        client.published = [];
+
+        applySchemaWithTopLevelAssets(helper._RED, ["Plant1"]); // Plant2 removed
+
+        var ddeath = decodedPublishesOf(client).find(function (p) { return p.topic === "spBv1.0/TestGroup/DDEATH/Edge1/Plant2"; });
+        should.exist(ddeath, "DDEATH for the removed Plant2 was not published");
+        should.exist(ddeath.payload.seq, "DDEATH must include a sequence number");
+        done();
+      });
+    });
+  });
+
+  it("refuses to connect at all when the configured Group ID contains a reserved Sparkplug character", function (done) {
+    loadEdgeNode({ groupId: "Bad+Group" }, function () {
+      // No mqtt.connect() call should have happened at all -- the fake
+      // client tracker stays null, proving connect() itself was never run.
+      should.not.exist(fakeMqtt.getLastFakeClient());
+      done();
+    });
+  });
+
+  it("refuses to connect at all when the configured Edge Node ID contains a reserved Sparkplug character", function (done) {
+    loadEdgeNode({ edgeNodeId: "Edge/1" }, function () {
+      should.not.exist(fakeMqtt.getLastFakeClient());
+      done();
+    });
+  });
+
+  it("warns but still publishes a DBIRTH when a DEVICE (asset) name contains a reserved Sparkplug character, rather than refusing outright", function (done) {
+    loadEdgeNode({}, function () {
+      var RED = helper._RED;
+      pluginFactory(RED);
+      RED.asset.replaceState({
+        attributeTemplates: [{ id: "tmpl", name: "T", attributes: [{ name: "Status", valueType: "string", default: "OK" }] }],
+        assets: [{ id: "p1", name: "Bad/Plant", parentId: null, templateIds: ["tmpl"], attributes: {} }],
+        historians: []
+      });
+      fakeMqtt.getLastFakeClient().simulateConnect();
+
+      var publishes = decodedPublishesOf(fakeMqtt.getLastFakeClient());
+      var dbirth = publishes.find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Bad/Plant"; });
+      should.exist(dbirth, "the (malformed but best-effort) DBIRTH was still published");
+      done();
+    });
+  });
+
   it("closes promptly instead of hanging when the broker is already gone at shutdown time (the reported Ctrl+C bug)", function (done) {
     loadEdgeNode({}, function () {
       setupAssets(helper._RED);

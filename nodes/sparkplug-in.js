@@ -47,8 +47,23 @@ function checkCompliance(msgType, payload, state) {
   });
 
   var isBirth = msgType === "NBIRTH" || msgType === "DBIRTH";
-  var isDeath = msgType === "NDEATH" || msgType === "DDEATH";
-  var isCommand = msgType === "NCMD" || msgType === "DCMD";
+  // Only NBIRTH resets seq to 0 — [tck-id-topics-nbirth-seq-num] (p.21).
+  // DBIRTH does NOT: [tck-id-topics-dbirth-seq]/[tck-id-payloads-dbirth-
+  // seq-inc] (p.32, p.92) both say its seq "MUST have a value of one
+  // greater than the previous MQTT message from the Edge Node" (wrapping
+  // at 255) — the EXACT SAME continuity rule as NDATA/DDATA/DDEATH, not a
+  // second reset-to-0. An earlier version of this check incorrectly
+  // required DBIRTH to also be 0, producing a false-positive
+  // "must reset seq to 0" issue on every single DBIRTH after a rebirth.
+  var isNbirth = msgType === "NBIRTH";
+  // [tck-id-payloads-sequence-num-always-included]: every Edge Node message
+  // MUST include seq EXCEPT NDEATH. DDEATH is NOT an exception — spec
+  // §6.4.26 (p.94): "[tck-id-payloads-ddeath-seq] Every DDEATH message MUST
+  // include a sequence number" — so NDEATH and DDEATH are NOT interchangeable
+  // here, unlike an earlier version of this check which grouped them together.
+  var hasSeq = payload.seq !== undefined && payload.seq !== null;
+  var seqForbidden = msgType === "NDEATH" || msgType === "NCMD" || msgType === "DCMD";
+  var seqRequired = isBirth || msgType === "NDATA" || msgType === "DDATA" || msgType === "DDEATH";
 
   if (msgType === "NBIRTH") {
     // [tck-id-message-flow-edge-node-birth-publish-will-message-payload-bdSeq]
@@ -64,24 +79,32 @@ function checkCompliance(msgType, payload, state) {
     }
   }
 
-  if (isBirth && payload.seq !== 0) {
-    issues.push("a BIRTH message must reset seq to 0, got " + payload.seq);
+  if (seqForbidden && hasSeq) {
+    issues.push(msgType + " messages MUST NOT include a sequence number, but one was present");
   }
 
-  // seq is one shared, node-wide counter across NBIRTH/DBIRTH/NDATA/DDATA —
-  // NOT a per-device one — and isn't meaningful on command/death messages,
-  // so only THOSE four participate in continuity tracking here.
-  if (!isDeath && !isCommand && payload.seq !== undefined && payload.seq !== null) {
-    if (!isBirth && state.lastSeq !== null) {
-      var expected = (state.lastSeq + 1) % 256;
-      if (payload.seq !== expected) {
-        issues.push(
-          "seq gap: expected " + expected + " but got " + payload.seq +
-          " (a message for this edge node may have been lost or delivered out of order)"
-        );
+  if (seqRequired) {
+    if (!hasSeq) {
+      issues.push(msgType + " is missing its required sequence number");
+    } else {
+      if (isNbirth && payload.seq !== 0) {
+        issues.push("NBIRTH must reset seq to 0, got " + payload.seq);
       }
+      // seq is one shared, node-wide counter across NBIRTH/DBIRTH/NDATA/
+      // DDATA/DDEATH — NOT a per-device one. DBIRTH participates in
+      // continuity just like DDATA/NDATA/DDEATH; only NBIRTH is exempt
+      // (it legitimately restarts at 0 regardless of what came before).
+      if (!isNbirth && state.lastSeq !== null) {
+        var expected = (state.lastSeq + 1) % 256;
+        if (payload.seq !== expected) {
+          issues.push(
+            "seq gap: expected " + expected + " but got " + payload.seq +
+            " (a message for this edge node may have been lost or delivered out of order)"
+          );
+        }
+      }
+      state.lastSeq = payload.seq;
     }
-    state.lastSeq = payload.seq;
   }
 
   return issues;
