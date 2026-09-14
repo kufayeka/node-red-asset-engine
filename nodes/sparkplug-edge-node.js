@@ -275,7 +275,22 @@ module.exports = function (RED) {
     // caller of the one real one.
     function applyIncomingMetric(fullPath, value) {
       try {
-        asset.setAttribute(fullPath, value);
+        // A "JsonString"-opted-in attribute is published as a plain
+        // Sparkplug String (see sparkplugMapping.js's SPARKPLUG_TYPE_ALIASES)
+        // holding JSON-source text — parse it back before writing, since
+        // asset.setAttribute doesn't otherwise know to (AssetStoreIndex.js's
+        // write path stores whatever it's given as-is, without consulting
+        // coerceAttributeValue). Left as the raw string if it doesn't
+        // actually parse, rather than dropping the write.
+        var coerced = value;
+        if (typeof value === "string") {
+          var matches = asset.getAttributes(fullPath);
+          var match = matches && matches[0];
+          if (match && match.sparkplugType === "JsonString") {
+            try { coerced = JSON.parse(value); } catch (e) { /* not valid JSON text -- write the raw string */ }
+          }
+        }
+        asset.setAttribute(fullPath, coerced);
       } catch (e) {
         node.warn("Sparkplug: failed to apply incoming write to \"" + fullPath + "\": " + describeError(e));
       }

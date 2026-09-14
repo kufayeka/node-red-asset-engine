@@ -108,6 +108,41 @@ describe("kufayeka-sparkplug-edge-node", function () {
     });
   });
 
+  it("end-to-end: an attribute template's opt-in sparkplugType flows all the way from schema to a properly-typed DBIRTH metric", function (done) {
+    loadEdgeNode({}, function () {
+      var RED = helper._RED;
+      pluginFactory(RED);
+      RED.asset.replaceState({
+        attributeTemplates: [{
+          id: "tmpl", name: "T",
+          attributes: [
+            // Full round trip through the REAL schema/hierarchy/mapping/
+            // codec pipeline (not just the pure functions in isolation) —
+            // a signed Int16 written as -1000 must survive as -1000, typed
+            // as "Int16" on the wire, not silently flattened to a Double.
+            { name: "Delta", valueType: "number", default: 0, sparkplugType: "Int16" },
+            { name: "Samples", valueType: "array", default: [], sparkplugType: "Int32Array" }
+          ]
+        }],
+        assets: [{ id: "p1", name: "Plant1", parentId: null, templateIds: ["tmpl"], attributes: { Delta: { value: -1000 }, Samples: { value: [1, -2, 3] } } }],
+        historians: []
+      });
+      fakeMqtt.getLastFakeClient().simulateConnect();
+
+      var dbirth = decodedPublishesOf(fakeMqtt.getLastFakeClient()).find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
+      should.exist(dbirth);
+      var delta = dbirth.payload.metrics.find(function (m) { return m.name === "Delta"; });
+      var samples = dbirth.payload.metrics.find(function (m) { return m.name === "Samples"; });
+      should.exist(delta);
+      delta.type.should.equal("Int16");
+      delta.value.should.equal(-1000);
+      should.exist(samples);
+      samples.type.should.equal("Int32Array");
+      samples.value.should.deepEqual([1, -2, 3]);
+      done();
+    });
+  });
+
   it("advances bdSeq (and refreshes the registered Will) on every underlying mqtt reconnect, not just node startup", function (done) {
     loadEdgeNode({}, function () {
       setupAssets(helper._RED);
@@ -193,6 +228,70 @@ describe("kufayeka-sparkplug-edge-node", function () {
       fakeMqtt.getLastFakeClient().simulateMessage("spBv1.0/TestGroup/DCMD/Edge1/Plant1", payload);
 
       asset.getValue("Plant1.Motor1.Speed").should.equal(123);
+      done();
+    });
+  });
+
+  it("end-to-end: engUnit/engHigh/engLow/Deadband properties and a metadata description flow from the attribute template into DBIRTH", function (done) {
+    loadEdgeNode({}, function () {
+      var RED = helper._RED;
+      pluginFactory(RED);
+      RED.asset.replaceState({
+        attributeTemplates: [{
+          id: "tmpl", name: "T",
+          attributes: [{
+            name: "air_pressure", valueType: "number", default: 0,
+            description: "Air pressure sensor", unit: "kPa", numberMin: 0, numberMax: 100, deadband: 0.5
+          }]
+        }],
+        assets: [{ id: "p1", name: "Plant1", parentId: null, templateIds: ["tmpl"], attributes: { air_pressure: { value: 7.6 } } }],
+        historians: []
+      });
+      fakeMqtt.getLastFakeClient().simulateConnect();
+
+      var dbirth = decodedPublishesOf(fakeMqtt.getLastFakeClient()).find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
+      var metric = dbirth.payload.metrics.find(function (m) { return m.name === "air_pressure"; });
+      should.exist(metric);
+      metric.value.should.equal(7.6);
+      metric.properties.should.deepEqual({ engUnit: "kPa", engHigh: 100, engLow: 0, Deadband: 0.5 });
+      metric.metadata.should.deepEqual({ description: "Air pressure sensor" });
+      done();
+    });
+  });
+
+  it("end-to-end: a \"JsonString\"-opted-in attribute round-trips a real JS object through DBIRTH and an incoming DCMD write-back", function (done) {
+    loadEdgeNode({}, function () {
+      var RED = helper._RED;
+      pluginFactory(RED);
+      RED.asset.replaceState({
+        attributeTemplates: [{
+          id: "tmpl", name: "T",
+          attributes: [{ name: "Config", valueType: "object", default: {}, sparkplugType: "JsonString" }]
+        }],
+        assets: [{ id: "p1", name: "Plant1", parentId: null, templateIds: ["tmpl"], attributes: { Config: { value: { retries: 3 } } } }],
+        historians: []
+      });
+      var asset = RED.asset;
+      fakeMqtt.getLastFakeClient().simulateConnect();
+
+      // 1. DBIRTH publishes it as a real Sparkplug String, JSON-stringified.
+      var dbirth = decodedPublishesOf(fakeMqtt.getLastFakeClient()).find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
+      var metric = dbirth.payload.metrics.find(function (m) { return m.name === "Config"; });
+      should.exist(metric);
+      metric.type.should.equal("String");
+      metric.value.should.equal(JSON.stringify({ retries: 3 }));
+
+      // 2. A Host Application writing back JSON-source text via DCMD must
+      // land as a real JS object again — asset.setAttribute otherwise has
+      // no reason to parse a plain string for an "object" attribute (see
+      // sparkplug-edge-node.js's applyIncomingMetric).
+      var payload = codec.encodePayload({
+        timestamp: Date.now(),
+        metrics: [{ name: "Config", type: "String", value: JSON.stringify({ retries: 5, mode: "fast" }) }]
+      });
+      fakeMqtt.getLastFakeClient().simulateMessage("spBv1.0/TestGroup/DCMD/Edge1/Plant1", payload);
+
+      asset.getValue("Plant1.Config").should.deepEqual({ retries: 5, mode: "fast" });
       done();
     });
   });

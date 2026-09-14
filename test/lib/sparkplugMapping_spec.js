@@ -26,6 +26,52 @@ describe("sparkplugMapping", function () {
     });
   });
 
+  describe("opt-in sparkplugType (attribute declares a SPECIFIC Sparkplug DataType, 1-34)", function () {
+    it("an attribute's own sparkplugType wins over the generic valueType-based mapping", function () {
+      mapping.mapValueTypeToSparkplugType({ valueType: "number", sparkplugType: "Int16" }).should.equal("Int16");
+      mapping.mapValueTypeToSparkplugType({ valueType: "number", sparkplugType: "Float" }).should.equal("Float");
+      mapping.mapValueTypeToSparkplugType({ valueType: "array", sparkplugType: "Int32Array" }).should.equal("Int32Array");
+    });
+
+    it("an unrecognized sparkplugType name is ignored, falling back to the generic mapping (never publishes a bogus type name)", function () {
+      mapping.mapValueTypeToSparkplugType({ valueType: "number", sparkplugType: "NotARealType" }).should.equal("Double");
+    });
+
+    it("a blank/unset sparkplugType behaves exactly like the legacy string-only calling convention", function () {
+      mapping.mapValueTypeToSparkplugType({ valueType: "boolean" }).should.equal("Boolean");
+      mapping.mapValueTypeToSparkplugType({ valueType: "string" }).should.equal("String");
+    });
+
+    it("toSparkplugMetric passes numeric opt-in types through as a plain number, letting sparkplugCodec do the real clamping", function () {
+      var m = mapping.toSparkplugMetric({ value: -5, valueType: "number", sparkplugType: "Int8", ts: 1 }, "Delta");
+      m.should.deepEqual({ name: "Delta", type: "Int8", value: -5, timestamp: 1 });
+    });
+
+    it("toSparkplugMetric passes an array opt-in type through as-is", function () {
+      var m = mapping.toSparkplugMetric({ value: [1, 2, 3], valueType: "array", sparkplugType: "Int32Array", ts: 1 }, "Samples");
+      m.type.should.equal("Int32Array");
+      m.value.should.deepEqual([1, 2, 3]);
+    });
+
+    it("toSparkplugMetric passes a Bytes opt-in type's value through untouched (Buffer, base64 string, or byte array — sparkplugCodec's own toBuffer() accepts all three)", function () {
+      var m = mapping.toSparkplugMetric({ value: "aGVsbG8=", valueType: "string", sparkplugType: "Bytes", ts: 1 }, "Blob");
+      m.type.should.equal("Bytes");
+      m.value.should.equal("aGVsbG8=");
+    });
+
+    it("toSparkplugMetric passes a DataSet opt-in type's friendly {columns,types,rows} value through untouched", function () {
+      var shape = { columns: ["a"], types: ["Int32"], rows: [[1]] };
+      var m = mapping.toSparkplugMetric({ value: shape, valueType: "object", sparkplugType: "DataSet", ts: 1 }, "Table");
+      m.type.should.equal("DataSet");
+      m.value.should.equal(shape);
+    });
+
+    it("isNull still short-circuits BEFORE any opt-in-type coercion, same as the generic path", function () {
+      var m = mapping.toSparkplugMetric({ value: null, valueType: "number", sparkplugType: "Int32", ts: 1 }, "X");
+      m.should.deepEqual({ name: "X", type: "Int32", isNull: true, timestamp: 1 });
+    });
+  });
+
   describe("toSparkplugMetric — null/missing values", function () {
     it("a null attribute value produces isNull:true with no value field (not a fake default)", function () {
       var m = mapping.toSparkplugMetric({ value: null, valueType: "number", ts: 1 }, "Speed");
@@ -103,6 +149,70 @@ describe("sparkplugMapping", function () {
       var topName = mapping.topLevelNameFromPath(changePath);
       var ddataName = mapping.relativeMetricNameFromPath(changePath, topName);
       ddataName.should.equal(dbirthName);
+    });
+  });
+
+  describe("\"JsonString\" — a wire-alias of \"String\", not a real Sparkplug DataType", function () {
+    it("mapValueTypeToSparkplugType resolves it to the real wire type \"String\"", function () {
+      mapping.mapValueTypeToSparkplugType({ valueType: "object", sparkplugType: "JsonString" }).should.equal("String");
+    });
+
+    it("coerceValueForSparkplug JSON.stringifies a plain JS object/array value", function () {
+      mapping.coerceValueForSparkplug({ a: 1 }, "object", "JsonString").should.equal(JSON.stringify({ a: 1 }));
+      mapping.coerceValueForSparkplug([1, 2, 3], "array", "JsonString").should.equal(JSON.stringify([1, 2, 3]));
+    });
+
+    it("coerceValueForSparkplug passes already-JSON-text through unchanged (no double-escaping)", function () {
+      var text = JSON.stringify({ a: 1 });
+      mapping.coerceValueForSparkplug(text, "string", "JsonString").should.equal(text);
+    });
+
+    it("coerceValueForSparkplug stringifies a plain (non-JSON) string too", function () {
+      mapping.coerceValueForSparkplug("hello", "string", "JsonString").should.equal(JSON.stringify("hello"));
+    });
+
+    it("toSparkplugMetric publishes type \"String\" with a JSON-stringified value, for an attribute opted into JsonString", function () {
+      var metric = mapping.toSparkplugMetric({ name: "Config", value: { retries: 3 }, valueType: "object", sparkplugType: "JsonString", ts: 1 }, "Config");
+      metric.type.should.equal("String");
+      metric.value.should.equal(JSON.stringify({ retries: 3 }));
+    });
+  });
+
+  describe("buildSparkplugProperties / buildSparkplugMetadata — engineering metadata, all optional", function () {
+    it("builds engUnit/engHigh/engLow/Deadband only from whatever the attribute actually has set", function () {
+      mapping.buildSparkplugProperties({ unit: "kPa", numberMax: 100, numberMin: 0, deadband: 0.5 })
+        .should.deepEqual({ engUnit: "kPa", engHigh: 100, engLow: 0, Deadband: 0.5 });
+    });
+
+    it("returns undefined (no `properties` at all) when nothing is set", function () {
+      should.not.exist(mapping.buildSparkplugProperties({}));
+    });
+
+    it("omits individual keys whose source field is null/blank rather than publishing a fake zero/empty", function () {
+      mapping.buildSparkplugProperties({ unit: "", numberMax: 100, numberMin: null, deadband: null })
+        .should.deepEqual({ engHigh: 100 });
+    });
+
+    it("buildSparkplugMetadata builds {description} only when the attribute has one, else undefined", function () {
+      mapping.buildSparkplugMetadata({ description: "Air pressure sensor" }).should.deepEqual({ description: "Air pressure sensor" });
+      should.not.exist(mapping.buildSparkplugMetadata({ description: "" }));
+      should.not.exist(mapping.buildSparkplugMetadata({}));
+    });
+
+    it("toSparkplugMetric attaches properties/metadata onto the metric only when present", function () {
+      var withBoth = mapping.toSparkplugMetric({ name: "P", value: 7.6, valueType: "number", unit: "kPa", numberMax: 100, numberMin: 0, description: "desc", ts: 1 }, "P");
+      withBoth.properties.should.deepEqual({ engUnit: "kPa", engHigh: 100, engLow: 0 });
+      withBoth.metadata.should.deepEqual({ description: "desc" });
+
+      var withNeither = mapping.toSparkplugMetric({ name: "Q", value: 1, valueType: "number", ts: 1 }, "Q");
+      withNeither.should.not.have.property("properties");
+      withNeither.should.not.have.property("metadata");
+    });
+
+    it("properties/metadata are attached even on an isNull metric", function () {
+      var metric = mapping.toSparkplugMetric({ name: "P", value: null, valueType: "number", unit: "kPa", ts: 1 }, "P");
+      metric.isNull.should.equal(true);
+      metric.properties.should.deepEqual({ engUnit: "kPa" });
     });
   });
 });

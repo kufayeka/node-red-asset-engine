@@ -422,6 +422,13 @@ aliasing, or the full DataType matrix.
    published as Sparkplug DDATA automatically (§3.2), and adding/removing a
    top-level asset via a schema re-apply automatically DBIRTHs/DDEATHs it
    (§3.8). Nothing else to wire.
+5. By default an attribute is published as Boolean/Double/String based on
+   its own `boolean|number|other` type — good enough for most cases. If a
+   downstream Host Application needs a specific narrower DataType (e.g. an
+   `Int16` instead of a `Double`, or a packed `Int32Array`), open the
+   Attribute Template editor and set that attribute's **Sparkplug Type**
+   dropdown (default "(auto)"). This is opt-in and per-attribute — leaving
+   it blank changes nothing.
 
 ### 7.2 How NBIRTH/DBIRTH get triggered
 
@@ -514,7 +521,7 @@ NDEATH/DDEATH message on the bus becomes one `msg`, decoded, with
 | 16 | **STATE topic / Primary Host Application handshake** (optional, opt-in) | ✅ Compliant |
 | 17 | **Per-Device Death (DDEATH)** | ✅ Compliant |
 | 18 | **Dynamic DBIRTH** for an asset added after initial connect, without a restart | ✅ Compliant |
-| 19 | Full Sparkplug DataType matrix | ⚠️ Partial |
+| 19 | Full Sparkplug DataType matrix (enum 1-34) | ✅ Compliant |
 | 20 | **Metric aliasing** | ❌ Not implemented |
 
 **Legend:** ✅ Compliant · ⚠️ Partial · ❌ Not implemented
@@ -570,63 +577,118 @@ Code: [publishDeviceDeath()](nodes/sparkplug-edge-node.js#L201-L208) — topic, 
 **#18 — Dynamic DBIRTH for runtime-added assets.** Spec §5.6 Device Session Establishment (p.41): *"A Device can publish a DBIRTH as long as an NBIRTH has been sent previously and the MQTT session is active."* — the spec explicitly expects a Device to be able to birth mid-session, not only at Edge Node startup.
 Code: [reconcileDevices()](nodes/sparkplug-edge-node.js#L215-L233) diffs the current top-level asset list against `knownDevices` on every `"schema.applied"` change event (wired in [onAssetChange()](nodes/sparkplug-edge-node.js#L235-L239)) — a newly-appeared asset gets an immediate `publishDeviceBirth()`, no reconnect or rebirth request needed.
 
-**#19 — Full DataType matrix — Partial, and here's what closing it actually requires.** Spec §6.4.16 Data Types (p.76) defines the full enum: `Int8/16/32/64`, `UInt8/16/32/64`, `Float`, `Double`, `Boolean`, `String`, `DateTime`, `Text`, plus `UUID`, `DataSet`, `Bytes`, `File`, `Template`, `PropertySet`, `PropertySetList`, and Array variants of the numeric/boolean/string types (§6.4.17, p.77-82).
-Code today: the asset engine's own attribute type system is only `boolean|string|number|array|object`, so [sparkplugMapping.js:11-15](lib/sparkplug/sparkplugMapping.js#L11-L15) only ever *produces* Boolean/Double/String. [sparkplugCodec.js](lib/sparkplug/sparkplugCodec.js) can structurally decode a few more numeric widths (`INT_LIKE_TYPES`/`LONG_LIKE_TYPES`) since `Int64`/`bdSeq` needs it, but falls back to String for anything else on encode — no DataSet, Template, Bytes, File, or PropertySet support at all.
+**#19 — Full DataType matrix (enum 1-34).** Spec §6.4.16 Data Types (p.76) defines the full enum: `Int8/16/32/64`, `UInt8/16/32/64`, `Float`, `Double`, `Boolean`, `String`, `DateTime`, `Text`, plus `UUID`, `DataSet`, `Bytes`, `File`, `Template`, `PropertySet`, `PropertySetList`, and Array variants of the numeric/boolean/string types (§6.4.17, p.77-82).
 
-This is genuinely **not a small fix** — unlike #16-18, it's not confined to
-`sparkplug-edge-node.js`. Full compliance would require, layered bottom-up:
+Implemented via an **additive, opt-in** design that deliberately does NOT
+touch the asset engine's own core attribute type system
+(`boolean|string|number|array|object`, `AssetSchemaService.js`/
+`assetDataUtils.js` are unchanged) — every existing attribute keeps behaving
+exactly as before. An attribute template can *additionally* set its own
+`sparkplugType` field (a new "Sparkplug Type" dropdown in the Attribute
+Template editor, blank = auto/unset) to publish/expect it as a specific
+DataType instead of the generic boolean→Boolean/number→Double/other→String
+mapping:
 
-1. **Codec** ([sparkplugCodec.js](lib/sparkplug/sparkplugCodec.js)): add
-   `encodeMetric`/`decodeMetric` branches for every remaining scalar type
-   (`Int8/16/32`, `UInt8/16/32/64`, `Float`, `DateTime`, `Text`, `UUID`,
-   `Bytes`, `File`) — mechanical, since the `.proto` schema already defines
-   all of them; the codec just never routes to most of them.
-2. **Structured types** (`DataSet`, `Template`, `PropertySet`) are a much
-   bigger jump: they're not scalar values but their own nested schemas
-   (spec §6.4.11-15, p.72-76) — a Template, for instance, needs a
-   `is_definition`/`template_ref` pair and its own member-metric list
-   published once in NBIRTH and referenced (not repeated) in every later
-   message. This is effectively a second encoding sub-system, not a few new
-   `if` branches.
-3. **`sparkplugMapping.js`**: `mapValueTypeToSparkplugType`/
-   `coerceValueForSparkplug` would need to consult more than just
-   `attr.valueType` to pick a richer type — today `array`/`object` always
-   collapse to a JSON-stringified `String` (line 18-19), which is exactly
-   the case that would instead become a `DataSet`/`Template`/`PropertySet`.
-4. **The asset engine's own schema model** (outside this Sparkplug code
-   entirely — `AssetSchemaService.js`) only knows `boolean|string|number|
-   array|object` as attribute types. To let a user actually *declare* "this
-   attribute is an Int16" or "this attribute is a Sparkplug DataSet" in the
-   Attribute Template editor, that type enum needs to grow, with UI to
-   match — array/object today already conflate a lot of possible intents
-   (a plain array *or* a future DataSet *or* a future Template all currently
-   look identical to the schema).
-5. **Decide the real target, not "everything"**: most production Sparkplug
-   deployments never use `File`, `UUID`, or `PropertySetList` in practice —
-   narrowing scope to "every scalar numeric width + Boolean/String +
-   DataSet" (skip Template/File/PropertySetList) is a reasonable, much
-   smaller v2 that would satisfy the overwhelming majority of real Host
-   Applications, Ignition included.
+- [sparkplugCodec.js](lib/sparkplug/sparkplugCodec.js) — full `DataType`
+  enum 0-34; `encodeMetric`/`decodeMetric` handle every scalar width
+  (`Int8/16/32/64`, `UInt8/16/32/64` — all six share ONE wire field,
+  `int_value`/`long_value`, per the `.proto` itself, p.77-78, disambiguated
+  only by the declared datatype), `Float`/`Double` (`Math.fround` for real
+  32-bit precision), `UUID`/`Text`, `Bytes`/`File`, all 13 packed **Array**
+  types (22-34 — spec §6.4.17, p.80-81: "All array types use the
+  `bytes_value` field... simply little-endian packed byte arrays", since
+  the `.proto` has no native repeated/array field for these), and the two
+  real structured types, `DataSet`/`Template` (via a friendly JS shape —
+  `{columns,types,rows}` / `{metrics,parameters,...}` — encoded into the
+  actual `dataset_value`/`template_value` submessages, not a JSON-in-bytes
+  shortcut). Verified **byte-for-byte** against the spec PDF's own §6.4.17
+  worked examples (see `test/lib/sparkplugCodec_spec.js`) — this caught two
+  apparent errata in the spec PDF itself (documented in the test file):
+  its own Int8Array example (`-23 -> 0xEF`) doesn't check out under two's
+  complement the way every other example on the same page does, and its
+  Float/Double/DateTime array examples print each value's bytes in
+  reversed (big-endian) order despite the identical page's own "little
+  endian packed" text — this codec follows the mathematically correct,
+  universally-implemented convention in both cases, verified independently
+  against Node's own `Buffer.writeDoubleLE`/etc.
+- [sparkplugMapping.js](lib/sparkplug/sparkplugMapping.js) —
+  `mapValueTypeToSparkplugType`/`coerceValueForSparkplug` check
+  `attr.sparkplugType` first; when set to a recognized name it wins
+  outright, otherwise the original generic mapping runs unchanged.
+- `AssetSchemaService.js`/`AssetStoreIndex.js` — `sparkplugType` threaded
+  through the attribute-template normalizer and both places effective
+  attributes get built, so it survives schema apply/redeploy and reaches
+  `getHierarchy()`/live change events.
+- End-to-end verified against the real schema→hierarchy→mapping→codec
+  pipeline, not just each layer in isolation (`test/nodes/sparkplug-edge-node_spec.js`).
 
-None of this is started — recommend treating it as its own separate,
-scoped piece of work rather than folding it into this round.
+**PropertySet/PropertySetList (20, 21) are not offered as a choice** in the
+picker and throw a clear error if forced via a direct API call — per the
+`.proto` itself (lines 200-211), a `Metric`'s own `value` oneof has no
+`propertyset_value`/`propertysets_value` option; those types only exist
+inside `PropertyValue` (used for a metric's `properties` field, a
+mechanism this codec doesn't populate). There is no wire slot to encode
+one into as a metric's own top-level value — this is a hard schema
+limitation, not a scoping choice.
+
+64-bit precision (`Int64`/`UInt64`/`DateTime`) is exact for encode (via
+`BigInt`) and for decode of a **top-level** metric (via the raw
+pre-`toObject` `Long` instance's own `.toSigned()`/`.toUnsigned()`) — a
+nested value inside a `Template`'s own metrics falls back to
+`Number.isSafeInteger` (2^53-1) precision, an accepted trade-off for a
+case this deep given how rarely nested-Template Int64 values near the
+64-bit boundary come up in practice.
+
+**Beyond the DataType matrix itself: `metric.metadata` and `metric.properties`
+are now also populated**, both spec-legal, both optional (checked directly
+against the `.proto`, not assumed):
+
+- `metric.properties` (.proto field 9, a `PropertySet`) — the spec (p.47-48)
+  describes this as nothing more than *"custom key/value pairs of
+  metadata"*; it defines **no standard property names at all**. `engUnit`/
+  `engHigh`/`engLow` are an Ignition/Cirrus Link convention layered on top
+  of this generic mechanism, not part of Sparkplug B itself — confirmed by
+  grepping the full spec PDF for "engineering"/"units" (zero matches). An
+  attribute template can now optionally set `unit`/`numberMax`/`numberMin`/
+  `deadband`, and [sparkplugMapping.js](lib/sparkplug/sparkplugMapping.js)'s
+  `buildSparkplugProperties` publishes whichever of `engUnit`/`engHigh`/
+  `engLow`/`Deadband` the attribute actually has set (any/all optional —
+  omitted entirely for an attribute that sets none of them, unchanged from
+  before this existed). `Deadband` here is mainly for this project's OWN
+  future historian (a report-by-exception/swinging-door threshold to read
+  directly off the attribute definition), not because a Host Application is
+  known to require it.
+- `metric.metadata` (.proto field 8, a spec-NATIVE `MetaData` message,
+  distinct from the generic `properties` above) — its own `description`
+  field is a better home for a human-readable tag description than
+  inventing a custom property for it; an attribute template's existing
+  `description` field is published there automatically.
+- A new `"JsonString"` value for `sparkplugType` is a WIRE-ALIAS of
+  `"String"` (Sparkplug has no native JSON type) — it exists purely so the
+  Attribute Template editor's Default Value field and the Asset Manager
+  sidebar's live Value field default to a JSON-editing widget, and so an
+  incoming write-back (DCMD/NCMD) gets `JSON.parse`'d back into a real JS
+  object/array instead of landing as a raw string (see
+  `sparkplug-edge-node.js`'s `applyIncomingMetric`).
+- Once an attribute has an explicit `sparkplugType`, its Default Value /
+  live Value editors are now LOCKED to the one input kind that actually
+  matches it (e.g. an `Int16` can only be edited as a number) — see
+  `asset-plugin.html`'s `resolveValueInputKind`. Left at "(auto)", editing
+  stays exactly as flexible as before.
 
 **#20 — Metric aliasing — NOT implemented.** Spec §6.4.6 Metric (p.67-68): *"alias — This is an unsigned 64-bit integer representing an optional alias... [tck-id-payloads-alias-birth-requirement] NBIRTH and DBIRTH messages MUST include both a metric name and alias. [tck-id-payloads-alias-data-cmd-requirement] NDATA, DDATA, NCMD, and DCMD messages MUST only include an alias and the metric name MUST be excluded."* (only *when* aliases are used — they're optional).
 Code: no `alias` field anywhere in [sparkplugCodec.js](lib/sparkplug/sparkplugCodec.js) or [sparkplugMapping.js](lib/sparkplug/sparkplugMapping.js) — every message always carries the full metric name, which is spec-legal (aliasing is opt-in) but means no bandwidth savings on repeated long metric names.
 
 ### 8.3 Verdict
 
-**Not 100% — 18 of 20 rows are now ✅ compliant; 1 partial, 1 not
-implemented.** The core Edge Node message-flow contract (topics, NBIRTH/
-DBIRTH/DDATA QoS and content, `seq`/`bdSeq` bookkeeping including the
-reconnect edge case, `is_null`, rebirth, NDEATH/Will correlation,
-write-back through the real asset path, ID validation) plus the optional
-Primary Host STATE handshake and dynamic per-Device DBIRTH/DDEATH are all
-compliant and test-covered. What's left:
+**Not 100% — 19 of 20 rows are now ✅ compliant; 1 not implemented.** The
+core Edge Node message-flow contract (topics, NBIRTH/DBIRTH/DDATA QoS and
+content, `seq`/`bdSeq` bookkeeping including the reconnect edge case,
+`is_null`, rebirth, NDEATH/Will correlation, write-back through the real
+asset path, ID validation, and now the full DataType matrix) plus the
+optional Primary Host STATE handshake and dynamic per-Device DBIRTH/DDEATH
+are all compliant and test-covered. What's left:
 
-- **#19 DataType matrix — partial.** See the breakdown in §8.2 above for
-  exactly what closing it requires; it's a real, multi-layer piece of work
-  (codec + structured types + schema model + UI), not a quick fix.
 - **#20 Metric aliasing — not implemented.** Purely a bandwidth
   optimization (spec-optional even when supported); no functional gap for
   a Host Application reading/writing this Edge Node today.
@@ -642,14 +704,16 @@ consumer will, which no amount of source review can fully substitute for.
 
 ## 9. Testing
 
-169 tests across `test/lib/sparkplugCodec_spec.js`,
+235 tests across `test/lib/sparkplugCodec_spec.js`,
 `test/lib/sparkplugMapping_spec.js`, `test/nodes/sparkplug-edge-node_spec.js`,
 `test/nodes/sparkplug-status_spec.js`, `test/nodes/sparkplug-in_spec.js`, and
 `test/nodes/sparkplug-out_spec.js` exercise every ✅ row above end-to-end
 against a fake MQTT broker (see
 [test/helpers/fakeMqtt.js](test/helpers/fakeMqtt.js)), including the
 Primary Host STATE handshake, dynamic DBIRTH/DDEATH on a schema re-apply,
-ID validation, and regression tests for both shutdown-hang fixes.
+ID validation, regression tests for both shutdown-hang fixes, and the full
+DataType matrix (byte-verified round-trips for every scalar and array type,
+DataSet/Template nesting, and PropertySet's encode-time rejection).
 
 ```bash
 npm test

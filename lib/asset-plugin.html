@@ -116,10 +116,53 @@ function getAllAttributePaths(globalSection, globalHierarchyById) {
     return Array.from(new Set(paths)).filter(Boolean).sort();
 }
 
+// Sparkplug DataTypes (see lib/sparkplug/sparkplugCodec.js's DataType enum,
+// plus the "JsonString" alias) -> the typedInput "kind" their value should
+// be edited as. Shared by both the Attribute Template editor's "Default
+// Value" field and the Asset Manager sidebar's live "Value" field, so a
+// value's editor always matches what the attribute will actually publish/
+// accept as, instead of letting a user pick a mismatched editor type.
+var SPARKPLUG_TYPE_INPUT_KIND = {
+    Int8: "num", Int16: "num", Int32: "num", Int64: "num",
+    UInt8: "num", UInt16: "num", UInt32: "num", UInt64: "num",
+    Float: "num", Double: "num", DateTime: "num",
+    Boolean: "bool",
+    String: "str", Text: "str", UUID: "str",
+    // Wire-alias of String (see sparkplugMapping.js's SPARKPLUG_TYPE_ALIASES)
+    // — defaults to the "json" editor purely for a nicer authoring
+    // experience (the actual value is still published as JSON-source text).
+    JsonString: "json",
+    // Bytes/File accept a base64 string or plain text — "str" is the
+    // simplest editable shape (sparkplugCodec's own toBuffer() handles it).
+    Bytes: "str", File: "str",
+    DataSet: "json", Template: "json",
+    Int8Array: "json", Int16Array: "json", Int32Array: "json", Int64Array: "json",
+    UInt8Array: "json", UInt16Array: "json", UInt32Array: "json", UInt64Array: "json",
+    FloatArray: "json", DoubleArray: "json", BooleanArray: "json", StringArray: "json", DateTimeArray: "json"
+};
+
+// Resolves what typedInput "kind" (num/bool/str/json) an attribute's value
+// should be edited as, and whether that choice is locked (the attribute
+// opted into a specific Sparkplug DataType, so there's exactly one right
+// answer) or just a sensible default (no sparkplugType set — falls back to
+// the attribute's own generic valueType, same as this always worked).
+function resolveValueInputKind(attr) {
+    attr = attr || {};
+    if (attr.sparkplugType && SPARKPLUG_TYPE_INPUT_KIND[attr.sparkplugType]) {
+        return { kind: SPARKPLUG_TYPE_INPUT_KIND[attr.sparkplugType], locked: true };
+    }
+    var kind = "str";
+    if (attr.valueType === "number") kind = "num";
+    else if (attr.valueType === "boolean") kind = "bool";
+    else if (attr.valueType === "object" || attr.valueType === "array") kind = "json";
+    return { kind: kind, locked: false };
+}
+
 window.KufayekaUtils = {
     makeId: makeId,
     sanitizeIdentifier: sanitizeIdentifier,
-    getAllAttributePaths: getAllAttributePaths
+    getAllAttributePaths: getAllAttributePaths,
+    resolveValueInputKind: resolveValueInputKind
 };
 
     // ==========================================
@@ -1345,21 +1388,23 @@ var KufayekaAssetManagerTab = (function () {
                 // 2. Description
                 $("<td>").css({ "color": "var(--red-ui-secondary-text-color, #64748b)", "font-size": "11px", "white-space": "nowrap" }).text(attr.description || "-").appendTo(tr);
 
-                // 3. Value Editor
+                // 3. Value Editor — ALWAYS locked to the attribute's own
+                // type (its opted-in Sparkplug Type if it has one, else its
+                // generic valueType): unlike the Attribute Template editor's
+                // Default Value (which stays freely-switchable while
+                // sparkplugType is "(auto)"), a live value here always has a
+                // well-defined type to write as, so there's never a case
+                // where switching away from it would make sense.
                 var tdVal = $("<td>").css({ "min-width": "190px" }).appendTo(tr);
                 var valInput = $('<input type="text" class="kufayeka-attr-val-input" style="width:100%">').appendTo(tdVal);
 
-                var inputType = "str";
-                if (attr.valueType === "number") {
-                    inputType = "num";
-                } else if (attr.valueType === "boolean") {
-                    inputType = "bool";
-                } else if (attr.valueType === "object" || attr.valueType === "array") {
-                    inputType = "json";
-                }
+                var valKind = (window.KufayekaUtils && window.KufayekaUtils.resolveValueInputKind)
+                    ? window.KufayekaUtils.resolveValueInputKind(attr)
+                    : { kind: "str" };
+                var inputType = valKind.kind;
 
                 valInput.typedInput({
-                    types: [inputType, "str", "json"]
+                    types: [inputType]
                 });
 
                 var initialVal = attr.value !== undefined && attr.value !== null ? (typeof attr.value === "object" ? JSON.stringify(attr.value) : String(attr.value)) : "";
@@ -1616,9 +1661,13 @@ var KufayekaAssetTemplateTab = (function () {
             { name: "En", width: "45px" },
             { name: "Name", width: "140px" },
             { name: "Description", width: "180px" },
-            { name: "Type", width: "140px" },
+            { name: "Value Type", width: "140px" },
+            { name: "Sparkplug Type (override)", width: "170px" },
             { name: "Default Value", width: "170px" },
             { name: "Unit", width: "110px" },
+            { name: "Eng Min", width: "80px" },
+            { name: "Eng Max", width: "80px" },
+            { name: "Deadband", width: "90px" },
             { name: "Historian", width: "75px" },
             { name: "Time Source (Autocomplete)", width: "260px" },
             { name: "Historian Target", width: "150px" },
@@ -1818,7 +1867,12 @@ var KufayekaAssetTemplateTab = (function () {
                     getStore().saveSchemaToConfigNode();
                 });
 
-            // 4. Type (TypedInput Single-Select Options)
+            // 4. Value Type — how this attribute is stored/coerced INSIDE
+            // the asset engine (boolean/string/number/object/array). This is
+            // a completely separate axis from "Sparkplug Type (override)"
+            // next to it, which only affects how the value is PUBLISHED on
+            // the Sparkplug wire — the two are allowed to differ (that's the
+            // whole point of the override), so don't expect them to match.
             var tdType = $("<td>").css({ "min-width": "140px" }).appendTo(tr);
             var typeInput = $('<input type="text" style="width:100%">').appendTo(tdType);
             typeInput.typedInput({
@@ -1839,19 +1893,108 @@ var KufayekaAssetTemplateTab = (function () {
             typeInput.typedInput("value", attr.valueType || "string");
             typeInput.on("change", function () {
                 attr.valueType = typeInput.typedInput("value");
+                // Sparkplug Type's "(auto)" label previews what THIS
+                // resolves to, and Default Value's editor kind may depend on
+                // it too when Sparkplug Type is left at "(auto)" — both need
+                // a re-render to stay in sync.
                 renderAttributes();
                 getStore().saveSchemaToConfigNode();
             });
+            RED.popover.tooltip(tdType, "How this attribute is stored internally (boolean/string/number/object/array). Separate from \"Sparkplug Type (override)\" — that one only affects how it's published on the Sparkplug wire, and can legitimately differ from this.");
 
-            // 5. Default Value
+            // 4b. Sparkplug Type (override) — OPTIONAL opt-in, publishes/
+            // expects this attribute as a SPECIFIC Sparkplug B DataType
+            // (spec §6.4.16, enum 1-34) instead of the generic mapping every
+            // attribute gets by default (see previewAutoSparkplugType right
+            // below for exactly what that generic mapping is). Left blank
+            // ("(auto -> ...)"), nothing changes from before — see
+            // lib/sparkplug/sparkplugMapping.js's mapValueTypeToSparkplugType,
+            // which this preview mirrors (display-only; the real mapping
+            // still lives there, this never runs server-side).
+            // PropertySet/PropertySetList are deliberately NOT offered here:
+            // the Sparkplug wire schema has no slot for them as a metric's
+            // own top-level value (see sparkplugCodec.js's own comment on
+            // why encoding one throws) — there'd be nothing a user could
+            // meaningfully pick them FOR.
+            function previewAutoSparkplugType(valueType) {
+                if (valueType === "boolean") return "Boolean";
+                if (valueType === "number") return "Double";
+                return "String"; // string, object, array, anything else
+            }
+            var tdSpType = $("<td>").css({ "min-width": "170px" }).appendTo(tr);
+            var spTypeInput = $('<input type="text" style="width:100%">').appendTo(tdSpType);
+            spTypeInput.typedInput({
+                types: [
+                    {
+                        value: "sptype",
+                        icon: "fa fa-microchip",
+                        options: [
+                            { value: "", label: "(auto → " + previewAutoSparkplugType(attr.valueType) + ")" },
+                            { value: "Int8", label: "Int8" }, { value: "Int16", label: "Int16" },
+                            { value: "Int32", label: "Int32" }, { value: "Int64", label: "Int64" },
+                            { value: "UInt8", label: "UInt8" }, { value: "UInt16", label: "UInt16" },
+                            { value: "UInt32", label: "UInt32" }, { value: "UInt64", label: "UInt64" },
+                            { value: "Float", label: "Float" }, { value: "Double", label: "Double" },
+                            { value: "Boolean", label: "Boolean" }, { value: "String", label: "String" },
+                            { value: "DateTime", label: "DateTime" }, { value: "Text", label: "Text" },
+                            { value: "UUID", label: "UUID" },
+                            // Wire-alias of "String" (see sparkplugMapping.js's
+                            // SPARKPLUG_TYPE_ALIASES) — picks this ONLY so the
+                            // Default Value / live Value editors below default to
+                            // a JSON-editing widget; nothing changes on the wire.
+                            { value: "JsonString", label: "JsonString (String, JSON-edited)" },
+                            { value: "DataSet", label: "DataSet" },
+                            { value: "Bytes", label: "Bytes" }, { value: "File", label: "File" },
+                            { value: "Template", label: "Template" },
+                            { value: "Int8Array", label: "Int8Array" }, { value: "Int16Array", label: "Int16Array" },
+                            { value: "Int32Array", label: "Int32Array" }, { value: "Int64Array", label: "Int64Array" },
+                            { value: "UInt8Array", label: "UInt8Array" }, { value: "UInt16Array", label: "UInt16Array" },
+                            { value: "UInt32Array", label: "UInt32Array" }, { value: "UInt64Array", label: "UInt64Array" },
+                            { value: "FloatArray", label: "FloatArray" }, { value: "DoubleArray", label: "DoubleArray" },
+                            { value: "BooleanArray", label: "BooleanArray" }, { value: "StringArray", label: "StringArray" },
+                            { value: "DateTimeArray", label: "DateTimeArray" }
+                        ]
+                    }
+                ]
+            });
+            spTypeInput.typedInput("value", attr.sparkplugType || "");
+            spTypeInput.on("change", function () {
+                attr.sparkplugType = spTypeInput.typedInput("value");
+                // Default Value's own editor type/lock depends on
+                // sparkplugType (see resolveValueInputKind below) — re-render
+                // the row so it picks up the new type immediately, same as
+                // the main "Type" dropdown's change handler already does.
+                renderAttributes();
+                getStore().saveSchemaToConfigNode();
+            });
+            RED.popover.tooltip(tdSpType, "Optional override for how this attribute is PUBLISHED on the Sparkplug wire only — does not change \"Value Type\" or how it's stored. Leave as (auto) to use the generic mapping shown in that option's own label.");
+
+            // 5. Default Value — once a specific Sparkplug Type is chosen,
+            // there's exactly one sensible editor for it (e.g. Int16 must be
+            // a number, an Array/DataSet/Template must be JSON) — LOCKED
+            // (a single-element `types` array hides typedInput's own type
+            // switcher), so it can't be switched to a mismatched shape. Left
+            // at "(auto)", this keeps its original freely-switchable
+            // behavior based on the attribute's generic valueType.
             var tdDef = $("<td>").css({ "min-width": "170px" }).appendTo(tr);
             var defInput = $('<input type="text" style="width:100%">').appendTo(tdDef);
-            var defType = "str";
-            if (attr.valueType === "number") defType = "num";
-            else if (attr.valueType === "boolean") defType = "bool";
-            else if (attr.valueType === "object" || attr.valueType === "array") defType = "json";
+            var defKind = (window.KufayekaUtils && window.KufayekaUtils.resolveValueInputKind)
+                ? window.KufayekaUtils.resolveValueInputKind(attr)
+                : { kind: "str", locked: false };
+            var defType = defKind.kind;
 
-            defInput.typedInput({ types: [defType, "str", "json"] });
+            // Visible, in-place explanation for WHY the editor below looks
+            // the way it does — previously this only existed as a tooltip on
+            // a DIFFERENT column (Sparkplug Type), so the cause-and-effect
+            // was easy to miss entirely.
+            if (defKind.locked) {
+                var lockHint = $('<div style="font-size:10px; color:var(--red-ui-secondary-text-color, #64748b); margin-bottom:2px;"></div>')
+                    .html('<i class="fa fa-lock"></i> locked: ' + attr.sparkplugType)
+                    .appendTo(tdDef);
+                RED.popover.tooltip(lockHint, "This editor is locked to match the \"" + attr.sparkplugType + "\" Sparkplug Type chosen for this attribute. Change or clear that to unlock it.");
+            }
+
+            defInput.typedInput({ types: defKind.locked ? [defType] : [defType, "str", "json"] });
             defInput.typedInput("type", defType);
             defInput.typedInput(
                 "value",
@@ -1881,6 +2024,50 @@ var KufayekaAssetTemplateTab = (function () {
                 attr.unit = unitInput.typedInput("value");
                 getStore().saveSchemaToConfigNode();
             });
+
+            // 6a. Engineering Min/Max — published as the Sparkplug properties
+            // "engLow"/"engHigh" (see sparkplugMapping.js's
+            // buildSparkplugProperties). Ignition's MQTT Engine recognizes
+            // these two names specifically; other Host Applications may
+            // simply ignore them. Blank/unset (null) means "no opinion".
+            var tdEngMin = $("<td>").css({ "min-width": "80px" }).appendTo(tr);
+            var engMinInput = $('<input type="text" style="width:100%">').appendTo(tdEngMin);
+            engMinInput.typedInput({ types: ["num"] });
+            engMinInput.typedInput("value", attr.numberMin != null ? String(attr.numberMin) : "");
+            engMinInput.on("change", function () {
+                var raw = engMinInput.typedInput("value");
+                attr.numberMin = raw === "" || raw === null || raw === undefined ? null : (Number(raw) || 0);
+                getStore().saveSchemaToConfigNode();
+            });
+            RED.popover.tooltip(tdEngMin, "Optional: engineering range low, published as the Sparkplug property \"engLow\". Leave blank for none.");
+
+            var tdEngMax = $("<td>").css({ "min-width": "80px" }).appendTo(tr);
+            var engMaxInput = $('<input type="text" style="width:100%">').appendTo(tdEngMax);
+            engMaxInput.typedInput({ types: ["num"] });
+            engMaxInput.typedInput("value", attr.numberMax != null ? String(attr.numberMax) : "");
+            engMaxInput.on("change", function () {
+                var raw = engMaxInput.typedInput("value");
+                attr.numberMax = raw === "" || raw === null || raw === undefined ? null : (Number(raw) || 0);
+                getStore().saveSchemaToConfigNode();
+            });
+            RED.popover.tooltip(tdEngMax, "Optional: engineering range high, published as the Sparkplug property \"engHigh\". Leave blank for none.");
+
+            // 6b. Deadband — report-by-exception / "swinging door" threshold.
+            // Also published as the Sparkplug property "Deadband" (see
+            // sparkplugMapping.js's buildSparkplugProperties), but its main
+            // purpose is for a future historian in this project to read
+            // directly off the attribute definition. Blank/unset (null)
+            // means "no opinion" — nothing is published for it.
+            var tdDeadband = $("<td>").css({ "min-width": "90px" }).appendTo(tr);
+            var deadbandInput = $('<input type="text" style="width:100%">').appendTo(tdDeadband);
+            deadbandInput.typedInput({ types: ["num"] });
+            deadbandInput.typedInput("value", attr.deadband != null ? String(attr.deadband) : "");
+            deadbandInput.on("change", function () {
+                var raw = deadbandInput.typedInput("value");
+                attr.deadband = raw === "" || raw === null || raw === undefined ? null : (Number(raw) || 0);
+                getStore().saveSchemaToConfigNode();
+            });
+            RED.popover.tooltip(tdDeadband, "Optional: report-by-exception threshold for a future historian's swinging-door compression, also published as the Sparkplug property \"Deadband\". Leave blank for none.");
 
             // 7. Historian Enabled
             var tdHist = $("<td>").css({ "text-align": "center", "width": "75px" }).appendTo(tr);
