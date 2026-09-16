@@ -160,7 +160,7 @@ return msg;</code></pre>
                 onchange: function(tab) {
                     $("#asset-func-tabs-content").children().hide();
                     $("#" + tab.id).show();
-                    var editor = $("#" + tab.id).find(".monaco-editor, .ace_editor").first();
+                    var editor = $("#" + tab.id).find(".cm-editor").first();
                     if (editor.length) {
                         RED.tray.resize();
                         if (that.initEditor && that.initEditor.focus && tab.id === "asset-func-tab-init") {
@@ -197,81 +197,70 @@ return msg;</code></pre>
             $("#node-input-outputs").spinner({ min: 0, max: 50 });
             $("#node-input-timeout").spinner({ min: 0 });
 
-            var editorGlobals = {
-                msg: true,
-                node: true,
-                context: true,
-                flow: true,
-                global: true,
-                env: true,
-                RED: true,
-                util: true,
-                console: true,
-                Buffer: true,
-                Date: true,
-                setTimeout: true,
-                clearTimeout: true,
-                setInterval: true,
-                clearInterval: true,
-                $: true,
-                asset: true
-            };
+            // CodeMirror 6 editors — NOT RED.editor.createEditor (ace/monaco).
+            // See lib/cm6/cm6-code-editor.js for why (a severe paste-
+            // triggered freeze in the sibling Nexa Dashboard package's own
+            // Monaco usage, which CM6's simpler architecture isn't subject
+            // to). All three stay alive simultaneously across the On Start/
+            // On Message/On Stop tabs, same as the Monaco/Ace version did —
+            // CM6 doesn't share ace/monaco's documented multi-instance bugs,
+            // so there's no need to destroy/recreate per tab switch, and
+            // this preserves each tab's own scroll/cursor position for free.
+            var completionSource = window.KufayekaCM6.assetPathCompletionSource;
 
             // Main Editor
-            this.editor = RED.editor.createEditor({
-                id: "node-input-func-editor",
-                mode: "ace/mode/nrjavascript",
+            this.editor = window.KufayekaCM6.createCM6Editor({
+                parent: document.getElementById("node-input-func-editor"),
                 value: $("#node-input-func").val(),
-                globals: editorGlobals
+                completionSource: completionSource
             });
 
             // Initialize Editor
-            this.initEditor = RED.editor.createEditor({
-                id: "node-input-init-editor",
-                mode: "ace/mode/nrjavascript",
+            this.initEditor = window.KufayekaCM6.createCM6Editor({
+                parent: document.getElementById("node-input-init-editor"),
                 value: $("#node-input-initialize").val(),
-                globals: editorGlobals
+                completionSource: completionSource
             });
 
             // Finalize Editor
-            this.finalizeEditor = RED.editor.createEditor({
-                id: "node-input-finalize-editor",
-                mode: "ace/mode/nrjavascript",
+            this.finalizeEditor = window.KufayekaCM6.createCM6Editor({
+                parent: document.getElementById("node-input-finalize-editor"),
                 value: $("#node-input-finalize").val(),
-                globals: editorGlobals
+                completionSource: completionSource
             });
 
-            // Expand buttons
+            // Expand buttons — a custom CM6 fullscreen modal, NOT
+            // RED.editor.editJavaScript(), which is itself Monaco/Ace
+            // underneath and would bring the exact freeze risk this
+            // migration exists to remove back in through the button most
+            // likely to see a big paste.
             $("#node-func-expand-js").on("click", function(e) {
                 e.preventDefault();
-                RED.editor.editJavaScript({
+                window.KufayekaCM6.openFullscreenCM6Editor({
                     value: that.editor.getValue(),
-                    globals: editorGlobals,
-                    complete: function(v) {
-                        that.editor.setValue(v, -1);
-                    }
+                    completionSource: completionSource,
+                    onComplete: function(v) { that.editor.setValue(v); that.editor.focus(); },
+                    onCancel: function() { that.editor.focus(); }
                 });
             });
 
             $("#node-init-expand-js").on("click", function(e) {
                 e.preventDefault();
-                RED.editor.editJavaScript({
+                window.KufayekaCM6.openFullscreenCM6Editor({
                     value: that.initEditor.getValue(),
-                    globals: editorGlobals,
-                    complete: function(v) {
-                        that.initEditor.setValue(v, -1);
-                    }
+                    completionSource: completionSource,
+                    onComplete: function(v) { that.initEditor.setValue(v); that.initEditor.focus(); },
+                    onCancel: function() { that.initEditor.focus(); }
                 });
             });
 
             $("#node-finalize-expand-js").on("click", function(e) {
                 e.preventDefault();
-                RED.editor.editJavaScript({
+                window.KufayekaCM6.openFullscreenCM6Editor({
                     value: that.finalizeEditor.getValue(),
-                    globals: editorGlobals,
-                    complete: function(v) {
-                        that.finalizeEditor.setValue(v, -1);
-                    }
+                    completionSource: completionSource,
+                    onComplete: function(v) { that.finalizeEditor.setValue(v); that.finalizeEditor.focus(); },
+                    onCancel: function() { that.finalizeEditor.focus(); }
                 });
             });
         },

@@ -4,7 +4,9 @@
   "description": "Kufayeka Asset Engine Plugin & Nodes for Node-RED",
   "main": "lib/asset-plugin.js",
   "scripts": {
-    "test": "mocha \"test/**/*_spec.js\""
+    "test": "mocha \"test/**/*_spec.js\"",
+    "build": "node build.js",
+    "watch": "node build.js --watch"
   },
   "dependencies": {
     "cronosjs": "^1.7.1",
@@ -41,5 +43,15 @@
     "tags",
     "attributes",
     "node-red-plugin"
-  ]
+  ],
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.5",
+    "@codemirror/view": "^6.43.12",
+    "codemirror": "^6.0.2",
+    "esbuild": "^0.28.2"
+  }
 }

@@ -1,3 +1,12 @@
+<!-- CodeMirror 6 bundle (lib/cm6/, built by build.js into dist/) — powers
+     the "asset function" node's code editors and the attribute calculation-
+     script dialog's editor below, replacing RED.editor.createEditor
+     (ace/monaco) for those two. Loaded once here since this file is loaded
+     on every admin page (it's a registered Node-RED plugin's editor HTML),
+     so window.KufayekaCM6 is available to nodes/asset-function.html too
+     without it needing its own <script> tag. See lib/cm6/cm6-code-editor.js
+     for why CM6 instead of Monaco/Ace. -->
+<script src="/asset-engine/_cm6-editor.js"></script>
 <style id="kufayeka-asset-engine-styles">
 .kufayeka-asset-table {
     width: 100%;
@@ -553,40 +562,41 @@ function openAttributeScriptEditor(attr, onSaved) {
             var form = $("<div>").css({ padding: "8px 4px" }).appendTo(content);
 
             // ==========================================
-            // 1. MONACO / ACE CODE EDITOR (Function Node Style)
+            // 1. CODEMIRROR 6 CODE EDITOR (Function Node Style)
             // ==========================================
+            // NOT RED.editor.createEditor (ace/monaco) — see
+            // lib/cm6/cm6-code-editor.js for why (a severe paste-triggered
+            // freeze in the sibling Nexa Dashboard package's own Monaco
+            // usage, which CM6's simpler architecture isn't subject to).
             var editorRow = $('<div class="form-row node-text-editor-row" style="position:relative; margin-bottom: 14px;"></div>').appendTo(form);
-            $('<div style="height: 240px; min-height: 160px;" class="node-text-editor" id="kufayeka-script-code-editor"></div>').appendTo(editorRow);
+            var editorMount = $('<div style="height: 240px; min-height: 160px;" class="node-text-editor" id="kufayeka-script-code-editor"></div>').appendTo(editorRow);
 
             var expandWrap = $('<div style="position: absolute; right: 0; bottom: calc(100% - 20px); z-index: 10;"></div>').appendTo(editorRow);
             var expandBtn = $('<button type="button" id="kufayeka-script-expand-js" class="red-ui-button red-ui-button-small"><i class="fa fa-expand"></i></button>').appendTo(expandWrap);
             RED.popover.tooltip(expandBtn, RED._("node-red:common.label.expand") || "Expand");
 
-            codeEditor = RED.editor.createEditor({
-                id: "kufayeka-script-code-editor",
-                mode: "ace/mode/nrjavascript",
+            codeEditor = window.KufayekaCM6.createCM6Editor({
+                parent: editorMount.get(0),
                 value: attr.script.code || "return self;",
-                globals: { self: true, current: true, prevSelf: true, setSibling: true, sibling: true, asset: true, $: true, Math: true }
+                completionSource: window.KufayekaCM6.assetPathCompletionSource
             });
 
+            // Custom CM6 fullscreen modal, NOT RED.editor.editJavaScript() —
+            // that kernel dialog is itself Monaco/Ace underneath, so calling
+            // it here would bring the exact freeze risk this migration
+            // exists to remove back in through the button most likely to
+            // see a big paste.
             expandBtn.on("click", function (e) {
                 e.preventDefault();
-                var value = codeEditor.getValue();
-                if (codeEditor.saveView) codeEditor.saveView();
-                RED.editor.editJavaScript({
-                    value: value,
-                    width: "Infinity",
-                    mode: "ace/mode/nrjavascript",
-                    focus: true,
-                    cancel: function () {
-                        setTimeout(function () { codeEditor.focus(); }, 250);
+                window.KufayekaCM6.openFullscreenCM6Editor({
+                    value: codeEditor.getValue(),
+                    completionSource: window.KufayekaCM6.assetPathCompletionSource,
+                    onComplete: function (v) {
+                        codeEditor.setValue(v);
+                        codeEditor.focus();
                     },
-                    complete: function (v) {
-                        codeEditor.setValue(v, -1);
-                        setTimeout(function () {
-                            if (codeEditor.restoreView) codeEditor.restoreView();
-                            codeEditor.focus();
-                        }, 250);
+                    onCancel: function () {
+                        codeEditor.focus();
                     }
                 });
             });
