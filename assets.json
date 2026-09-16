@@ -1,27 +1,32 @@
 {
   "assets": [
     {
-      "id": "asset-0",
-      "name": "Plant1",
+      "id": "m1",
+      "name": "Motor1",
       "parentId": null,
       "templateIds": [
-        "tmpl"
+        "tmpl-motor"
       ],
-      "attributes": {}
+      "attributes": {
+        "Speed": {
+          "value": 3450,
+          "ts": "2026-09-15T17:19:23.780Z"
+        }
+      }
     }
   ],
   "attributeTemplates": [
     {
-      "id": "tmpl",
-      "name": "T",
+      "id": "tmpl-motor",
+      "name": "MotorTemplate",
       "description": "",
       "attributes": [
         {
           "enabled": true,
-          "name": "Status",
+          "name": "Speed",
           "description": "",
-          "valueType": "string",
-          "default": "OK",
+          "valueType": "number",
+          "default": 0,
           "unit": "",
           "script": {
             "enabled": false,
