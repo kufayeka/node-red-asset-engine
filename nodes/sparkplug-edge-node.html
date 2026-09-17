@@ -6,14 +6,37 @@
       brokerUrl: { value: "mqtt://localhost:1883", required: true },
       groupId: { value: "Kufayeka", required: true },
       edgeNodeId: { value: "", required: true },
-      primaryHostId: { value: "" }
+      primaryHostId: { value: "" },
+      keepAlive: { value: 30, validate: RED.validators.number() },
+      protocolVersion: { value: "4" },
+      reconnectPeriod: { value: 5000, validate: RED.validators.number() },
+      connectTimeout: { value: 30000, validate: RED.validators.number() },
+      clientIdOverride: { value: "" }
     },
     credentials: {
       username: { type: "text" },
-      password: { type: "password" }
+      password: { type: "password" },
+      rejectUnauthorized: { type: "text" },
+      ca: { type: "text" },
+      cert: { type: "text" },
+      key: { type: "text" }
     },
     label: function () {
       return this.name || (this.groupId + "/" + this.edgeNodeId) || "Sparkplug Edge Node";
+    },
+    oneditprepare: function () {
+      // rejectUnauthorized is a credentials field (encrypted at rest, like
+      // username/password/ca/cert/key above it) but needs a real checkbox in
+      // the UI — Node-RED's own generic credential loader only knows how to
+      // .val() a field, not .prop("checked", ...) one, so this bridges the
+      // stored "true"/"false" string <-> checkbox by hand. Defaults to
+      // checked (true) since that's this node's own safe default when the
+      // field has never been set.
+      var stored = this.credentials && this.credentials.rejectUnauthorized;
+      $("#node-config-input-rejectUnauthorized").prop("checked", stored !== "false");
+    },
+    oneditsave: function () {
+      this.credentials.rejectUnauthorized = $("#node-config-input-rejectUnauthorized").prop("checked") ? "true" : "false";
     }
   });
 </script>
@@ -47,6 +70,53 @@
   <div class="form-row">
     <label for="node-config-input-primaryHostId"><i class="fa fa-shield"></i> Primary Host ID</label>
     <input type="text" id="node-config-input-primaryHostId" placeholder="(optional) e.g. Ignition">
+  </div>
+  <hr>
+  <div class="form-row">
+    <label for="node-config-input-keepAlive"><i class="fa fa-heartbeat"></i> Keep Alive (s)</label>
+    <input type="text" id="node-config-input-keepAlive" placeholder="30">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-protocolVersion"><i class="fa fa-plug"></i> MQTT Version</label>
+    <select id="node-config-input-protocolVersion" style="width: calc(100% - 110px);">
+      <option value="4">3.1.1 (Sparkplug B default)</option>
+      <option value="5">5.0</option>
+    </select>
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-reconnectPeriod"><i class="fa fa-refresh"></i> Reconnect (ms)</label>
+    <input type="text" id="node-config-input-reconnectPeriod" placeholder="5000">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-connectTimeout"><i class="fa fa-clock-o"></i> Connect Timeout (ms)</label>
+    <input type="text" id="node-config-input-connectTimeout" placeholder="30000">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-clientIdOverride"><i class="fa fa-id-card"></i> Client ID</label>
+    <input type="text" id="node-config-input-clientIdOverride" placeholder="(auto: kufayeka-sparkplug-<group>-<edge node>)">
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-rejectUnauthorized"><i class="fa fa-lock"></i>&nbsp;</label>
+    <input type="checkbox" id="node-config-input-rejectUnauthorized" style="display:inline-block; width:auto; vertical-align:middle;">
+    <label for="node-config-input-rejectUnauthorized" style="width:auto;">Reject unauthorized TLS certificates</label>
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-ca"><i class="fa fa-certificate"></i> CA Cert (PEM)</label>
+    <textarea id="node-config-input-ca" rows="2" style="width: calc(100% - 110px); font-family: monospace; font-size: 11px;" placeholder="(optional — for mqtts:///wss:// with a private CA)"></textarea>
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-cert"><i class="fa fa-id-badge"></i> Client Cert (PEM)</label>
+    <textarea id="node-config-input-cert" rows="2" style="width: calc(100% - 110px); font-family: monospace; font-size: 11px;" placeholder="(optional — mutual TLS)"></textarea>
+  </div>
+  <div class="form-row">
+    <label for="node-config-input-key"><i class="fa fa-key"></i> Client Key (PEM)</label>
+    <textarea id="node-config-input-key" rows="2" style="width: calc(100% - 110px); font-family: monospace; font-size: 11px;" placeholder="(optional — mutual TLS)"></textarea>
+  </div>
+  <div class="form-tips">
+    <p>QoS (<code>0</code> for NBIRTH/DBIRTH/DDATA/DDEATH, <code>1</code> for the Will/
+    NDEATH), <code>retain: false</code>, and Clean Session (<code>true</code>) are fixed
+    per the Sparkplug B specification and are not configurable here — changing them
+    would risk breaking Host Application compatibility.</p>
   </div>
   <div class="form-tips">
     <p>Publishes this Node-RED instance's whole asset tree onto the Sparkplug B

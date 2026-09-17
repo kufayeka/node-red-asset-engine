@@ -1,11 +1,15 @@
 const should = require("should");
 
-// See test/helpers/fakeMqtt.js for why this MUST be a single shared helper
-// (installed before anything else requires "mqtt" for real) rather than
-// something this file sets up on its own — this spec file and
-// sparkplug-edge-node_spec.js both load nodes/sparkplug-edge-node.js, and
-// that module is only ever require()'d for real ONCE per mocha process.
-const fakeMqtt = require("../helpers/fakeMqtt");
+// See test/helpers/fakeWorker.js for why this MUST be a single shared helper
+// (installed before anything else calls nodes/sparkplug-edge-node.js's
+// _setWorkerFactoryForTests) rather than something this file sets up on its
+// own — this spec file and sparkplug-edge-node_spec.js both load
+// nodes/sparkplug-edge-node.js, and that module is only ever require()'d for
+// real ONCE per mocha process. The actual mqtt.connect()/Protobuf codec now
+// live in a worker_threads.Worker (lib/sparkplug-worker.js), so this fakes
+// the worker, not require("mqtt") (that's test/helpers/fakeMqtt.js, used by
+// test/lib/sparkplug-worker_spec.js instead).
+const fakeWorker = require("../helpers/fakeWorker");
 
 const helper = require("node-red-node-test-helper");
 const edgeNodeModule = require("../../nodes/sparkplug-edge-node.js");
@@ -21,7 +25,7 @@ describe("kufayeka-sparkplug-status", function () {
     helper.stopServer(done);
   });
   afterEach(function () {
-    fakeMqtt.resetLastFakeClient();
+    fakeWorker.resetLastFakeWorker();
     return helper.unload();
   });
 
@@ -45,7 +49,7 @@ describe("kufayeka-sparkplug-status", function () {
       var seen = [];
       statusNode.status = function (s) { seen.push(s); };
 
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      fakeWorker.getLastFakeWorker().simulateStatus("connected");
 
       var online = seen.find(function (s) { return s.fill === "green"; });
       should.exist(online, "status node never saw the Edge Node's \"online\" status");

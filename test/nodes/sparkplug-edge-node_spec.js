@@ -1,19 +1,30 @@
 const should = require("should");
 
-// See test/helpers/fakeMqtt.js for why this MUST be a single shared helper
-// (installed before anything else requires "mqtt" for real) rather than
-// something this file sets up on its own.
-const fakeMqtt = require("../helpers/fakeMqtt");
-
 const helper = require("node-red-node-test-helper");
 const edgeNodeModule = require("../../nodes/sparkplug-edge-node.js");
 const pluginFactory = require("../../lib/asset-plugin.js");
-const codec = require("../../lib/sparkplug/sparkplugCodec");
 
-function decodedPublishesOf(client) {
-  return client.published.map(function (p) {
-    return { topic: p.topic, payload: codec.decodePayload(p.payload) };
-  });
+// The actual mqtt.connect()/Protobuf codec/bdSeq/seq/topic-construction now
+// live in a worker_threads.Worker (lib/sparkplug-worker.js — see its own
+// header comment for the full protocol and why). A real worker runs in its
+// own isolated module registry, so faking require("mqtt") in THIS test
+// process (test/helpers/fakeMqtt.js, still used by
+// test/lib/sparkplug-worker_spec.js for exactly that file) can't reach it.
+// This spec instead substitutes the worker itself, via the SHARED
+// test/helpers/fakeWorker.js (also used by sparkplug-status_spec.js — same
+// "single shared helper" reasoning as fakeMqtt.js), and tests only the MAIN
+// THREAD's decisions: what metrics to birth from the asset store, when to
+// defer for a Primary Host, how to apply an incoming write. Wire-level
+// concerns (bdSeq wrapping, QoS, topic strings, seq numbers) are covered by
+// test/lib/sparkplug-worker_spec.js instead.
+const fakeWorker = require("../helpers/fakeWorker");
+
+function lastFakeWorker() { return fakeWorker.getLastFakeWorker(); }
+function postedOf(type) {
+  return lastFakeWorker().posted.filter(function (m) { return m.type === type; });
+}
+function deviceBirthFor(deviceId) {
+  return postedOf("deviceBirth").find(function (m) { return m.deviceId === deviceId; });
 }
 
 describe("kufayeka-sparkplug-edge-node", function () {
@@ -25,7 +36,7 @@ describe("kufayeka-sparkplug-edge-node", function () {
     helper.stopServer(done);
   });
   afterEach(function () {
-    fakeMqtt.resetLastFakeClient();
+    fakeWorker.resetLastFakeWorker();
     return helper.unload();
   });
 
@@ -69,41 +80,37 @@ describe("kufayeka-sparkplug-edge-node", function () {
     return RED.asset;
   }
 
+  it("passes the worker its groupId/edgeNodeId/broker/clientId and the new spec-conformant connection parameters", function (done) {
+    loadEdgeNode({ keepAlive: 45, protocolVersion: 5, reconnectPeriod: 2000, connectTimeout: 10000, clientIdOverride: "my-id" }, function () {
+      var wd = lastFakeWorker().workerData;
+      wd.groupId.should.equal("TestGroup");
+      wd.edgeNodeId.should.equal("Edge1");
+      wd.brokerUrl.should.equal("mqtt://fake-broker");
+      wd.clientId.should.equal("my-id");
+      wd.keepAlive.should.equal(45);
+      wd.protocolVersion.should.equal(5);
+      wd.reconnectPeriod.should.equal(2000);
+      wd.connectTimeout.should.equal(10000);
+      done();
+    });
+  });
+
   it("publishes NBIRTH then one DBIRTH for the top-level asset, with correctly-named/typed metrics", function (done) {
     loadEdgeNode({}, function () {
       setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      var publishes = decodedPublishesOf(fakeMqtt.getLastFakeClient());
-      var nbirth = publishes.find(function (p) { return p.topic === "spBv1.0/TestGroup/NBIRTH/Edge1"; });
-      var dbirth = publishes.find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
+      postedOf("birth").length.should.equal(1);
+      var dbirth = deviceBirthFor("Plant1");
+      should.exist(dbirth, "DBIRTH for Plant1 was not posted to the worker");
 
-      should.exist(nbirth, "NBIRTH was not published");
-      should.exist(nbirth.payload.metrics.find(function (m) { return m.name === "bdSeq"; }), "NBIRTH is missing its bdSeq metric");
-      // [tck-id-topics-nbirth-rebirth-metric]: mandatory on every NBIRTH —
-      // this is how a Host Application knows it CAN request a rebirth.
-      var rebirthMetric = nbirth.payload.metrics.find(function (m) { return m.name === "Node Control/Rebirth"; });
-      should.exist(rebirthMetric, "NBIRTH is missing the mandatory \"Node Control/Rebirth\" metric");
-      rebirthMetric.type.should.equal("Boolean");
-      rebirthMetric.value.should.equal(false);
-
-      should.exist(dbirth, "DBIRTH for Plant1 was not published");
-      var status = dbirth.payload.metrics.find(function (m) { return m.name === "Status"; });
-      var speed = dbirth.payload.metrics.find(function (m) { return m.name === "Motor1/Speed"; });
-      should.exist(status, "root-level attribute Status missing from DBIRTH");
+      var status = dbirth.metrics.find(function (m) { return m.name === "Status"; });
+      var speed = dbirth.metrics.find(function (m) { return m.name === "Motor1/Speed"; });
+      should.exist(status, "root-level attribute Status missing from DBIRTH metrics");
       status.value.should.equal("OK");
-      should.exist(speed, "nested attribute Motor1/Speed missing from DBIRTH");
+      should.exist(speed, "nested attribute Motor1/Speed missing from DBIRTH metrics");
       speed.value.should.equal(10);
       speed.type.should.equal("Double");
-
-      // [tck-id-payloads-nbirth-qos] / [-dbirth-qos]: MUST be QoS 0, not 1 —
-      // Sparkplug's own seq/bdSeq numbers (not MQTT QoS) are what let a Host
-      // Application detect a lost Birth.
-      var rawNbirth = fakeMqtt.getLastFakeClient().published.find(function (p) { return p.topic === "spBv1.0/TestGroup/NBIRTH/Edge1"; });
-      var rawDbirth = fakeMqtt.getLastFakeClient().published.find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
-      rawNbirth.opts.qos.should.equal(0);
-      rawDbirth.opts.qos.should.equal(0);
-
       done();
     });
   });
@@ -116,10 +123,10 @@ describe("kufayeka-sparkplug-edge-node", function () {
         attributeTemplates: [{
           id: "tmpl", name: "T",
           attributes: [
-            // Full round trip through the REAL schema/hierarchy/mapping/
-            // codec pipeline (not just the pure functions in isolation) —
-            // a signed Int16 written as -1000 must survive as -1000, typed
-            // as "Int16" on the wire, not silently flattened to a Double.
+            // Full round trip through the REAL schema/hierarchy/mapping
+            // pipeline (not just the pure functions in isolation) — a
+            // signed Int16 written as -1000 must survive as -1000, typed
+            // as "Int16" in the metrics array handed to the worker.
             { name: "Delta", valueType: "number", default: 0, sparkplugType: "Int16" },
             { name: "Samples", valueType: "array", default: [], sparkplugType: "Int32Array" }
           ]
@@ -127,12 +134,12 @@ describe("kufayeka-sparkplug-edge-node", function () {
         assets: [{ id: "p1", name: "Plant1", parentId: null, templateIds: ["tmpl"], attributes: { Delta: { value: -1000 }, Samples: { value: [1, -2, 3] } } }],
         historians: []
       });
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      var dbirth = decodedPublishesOf(fakeMqtt.getLastFakeClient()).find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
+      var dbirth = deviceBirthFor("Plant1");
       should.exist(dbirth);
-      var delta = dbirth.payload.metrics.find(function (m) { return m.name === "Delta"; });
-      var samples = dbirth.payload.metrics.find(function (m) { return m.name === "Samples"; });
+      var delta = dbirth.metrics.find(function (m) { return m.name === "Delta"; });
+      var samples = dbirth.metrics.find(function (m) { return m.name === "Samples"; });
       should.exist(delta);
       delta.type.should.equal("Int16");
       delta.value.should.equal(-1000);
@@ -143,55 +150,19 @@ describe("kufayeka-sparkplug-edge-node", function () {
     });
   });
 
-  it("advances bdSeq (and refreshes the registered Will) on every underlying mqtt reconnect, not just node startup", function (done) {
-    loadEdgeNode({}, function () {
-      setupAssets(helper._RED);
-      var client = fakeMqtt.getLastFakeClient();
-      client.simulateConnect();
-
-      var firstNbirth = decodedPublishesOf(client).find(function (p) { return p.topic === "spBv1.0/TestGroup/NBIRTH/Edge1"; });
-      var firstBdSeq = firstNbirth.payload.metrics.find(function (m) { return m.name === "bdSeq"; }).value;
-
-      client.published = [];
-      // A library-level auto-reconnect (network blip, broker restart) is a
-      // genuinely NEW MQTT session — bdSeq must be different this time, or
-      // this session's Will (and NBIRTH) would be indistinguishable from
-      // the previous one's to a Host Application.
-      client.simulateReconnect();
-
-      var secondNbirth = decodedPublishesOf(client).find(function (p) { return p.topic === "spBv1.0/TestGroup/NBIRTH/Edge1"; });
-      var secondBdSeq = secondNbirth.payload.metrics.find(function (m) { return m.name === "bdSeq"; }).value;
-
-      secondBdSeq.should.not.equal(firstBdSeq);
-
-      // The Will re-registered for this session must already carry the
-      // SAME new bdSeq as the NBIRTH that just followed it — mqtt.js reads
-      // client.options.will fresh right when it builds each CONNECT
-      // packet (see mqtt/build/lib/client.js), so this has to already be
-      // updated by the time "reconnect" handling finishes, not later.
-      var willMetric = codec.decodePayload(client.options.will.payload).metrics.find(function (m) { return m.name === "bdSeq"; });
-      should.exist(willMetric);
-      willMetric.value.should.equal(secondBdSeq);
-
-      done();
-    });
-  });
-
-  it("publishes DDATA with the SAME metric name DBIRTH used, when the underlying asset attribute changes", function (done) {
+  it("publishes a deviceData message with the SAME metric name DBIRTH used, when the underlying asset attribute changes", function (done) {
     loadEdgeNode({}, function () {
       var asset = setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
-      fakeMqtt.getLastFakeClient().published = []; // only care about what happens AFTER birth from here on
+      lastFakeWorker().simulateStatus("connected");
+      lastFakeWorker().posted = []; // only care about what happens AFTER birth from here on
 
       asset.setAttribute("Plant1.Motor1.Speed", 77);
 
-      var publishes = decodedPublishesOf(fakeMqtt.getLastFakeClient());
-      var ddata = publishes.find(function (p) { return p.topic === "spBv1.0/TestGroup/DDATA/Edge1/Plant1"; });
-      should.exist(ddata, "DDATA for Plant1 was not published after an attribute change");
-      var speed = ddata.payload.metrics.find(function (m) { return m.name === "Motor1/Speed"; });
+      var ddata = postedOf("deviceData").find(function (m) { return m.deviceId === "Plant1"; });
+      should.exist(ddata, "deviceData for Plant1 was not posted after an attribute change");
+      var speed = ddata.metrics.find(function (m) { return m.name === "Motor1/Speed"; });
       should.exist(speed);
       speed.value.should.equal(77);
-
       done();
     });
   });
@@ -199,19 +170,17 @@ describe("kufayeka-sparkplug-edge-node", function () {
   it("publishes isNull:true (not a fake 0/\"\"/false) for an attribute whose value is genuinely null", function (done) {
     loadEdgeNode({}, function () {
       var asset = setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
-      fakeMqtt.getLastFakeClient().published = [];
+      lastFakeWorker().simulateStatus("connected");
+      lastFakeWorker().posted = [];
 
       asset.setAttribute("Plant1.Motor1.Speed", null);
 
-      var publishes = decodedPublishesOf(fakeMqtt.getLastFakeClient());
-      var ddata = publishes.find(function (p) { return p.topic === "spBv1.0/TestGroup/DDATA/Edge1/Plant1"; });
-      should.exist(ddata, "DDATA for Plant1 was not published after setting the attribute to null");
-      var speed = ddata.payload.metrics.find(function (m) { return m.name === "Motor1/Speed"; });
+      var ddata = postedOf("deviceData").find(function (m) { return m.deviceId === "Plant1"; });
+      should.exist(ddata, "deviceData for Plant1 was not posted after setting the attribute to null");
+      var speed = ddata.metrics.find(function (m) { return m.name === "Motor1/Speed"; });
       should.exist(speed);
       speed.isNull.should.equal(true);
       should.not.exist(speed.value);
-
       done();
     });
   });
@@ -219,13 +188,9 @@ describe("kufayeka-sparkplug-edge-node", function () {
   it("applies an incoming DCMD write the same way the internal asset-write node would", function (done) {
     loadEdgeNode({}, function () {
       var asset = setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      var payload = codec.encodePayload({
-        timestamp: Date.now(),
-        metrics: [{ name: "Motor1/Speed", type: "Double", value: 123 }]
-      });
-      fakeMqtt.getLastFakeClient().simulateMessage("spBv1.0/TestGroup/DCMD/Edge1/Plant1", payload);
+      lastFakeWorker().simulateDcmd("Plant1", [{ name: "Motor1/Speed", value: 123 }]);
 
       asset.getValue("Plant1.Motor1.Speed").should.equal(123);
       done();
@@ -247,10 +212,10 @@ describe("kufayeka-sparkplug-edge-node", function () {
         assets: [{ id: "p1", name: "Plant1", parentId: null, templateIds: ["tmpl"], attributes: { air_pressure: { value: 7.6 } } }],
         historians: []
       });
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      var dbirth = decodedPublishesOf(fakeMqtt.getLastFakeClient()).find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
-      var metric = dbirth.payload.metrics.find(function (m) { return m.name === "air_pressure"; });
+      var dbirth = deviceBirthFor("Plant1");
+      var metric = dbirth.metrics.find(function (m) { return m.name === "air_pressure"; });
       should.exist(metric);
       metric.value.should.equal(7.6);
       metric.properties.should.deepEqual({ engUnit: "kPa", engHigh: 100, engLow: 0, Deadband: 0.5 });
@@ -272,11 +237,11 @@ describe("kufayeka-sparkplug-edge-node", function () {
         historians: []
       });
       var asset = RED.asset;
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      // 1. DBIRTH publishes it as a real Sparkplug String, JSON-stringified.
-      var dbirth = decodedPublishesOf(fakeMqtt.getLastFakeClient()).find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Plant1"; });
-      var metric = dbirth.payload.metrics.find(function (m) { return m.name === "Config"; });
+      // 1. DBIRTH's metrics carry it as a real Sparkplug String, JSON-stringified.
+      var dbirth = deviceBirthFor("Plant1");
+      var metric = dbirth.metrics.find(function (m) { return m.name === "Config"; });
       should.exist(metric);
       metric.type.should.equal("String");
       metric.value.should.equal(JSON.stringify({ retries: 3 }));
@@ -285,11 +250,7 @@ describe("kufayeka-sparkplug-edge-node", function () {
       // land as a real JS object again — asset.setAttribute otherwise has
       // no reason to parse a plain string for an "object" attribute (see
       // sparkplug-edge-node.js's applyIncomingMetric).
-      var payload = codec.encodePayload({
-        timestamp: Date.now(),
-        metrics: [{ name: "Config", type: "String", value: JSON.stringify({ retries: 5, mode: "fast" }) }]
-      });
-      fakeMqtt.getLastFakeClient().simulateMessage("spBv1.0/TestGroup/DCMD/Edge1/Plant1", payload);
+      lastFakeWorker().simulateDcmd("Plant1", [{ name: "Config", value: JSON.stringify({ retries: 5, mode: "fast" }) }]);
 
       asset.getValue("Plant1.Config").should.deepEqual({ retries: 5, mode: "fast" });
       done();
@@ -299,13 +260,9 @@ describe("kufayeka-sparkplug-edge-node", function () {
   it("applies an incoming NCMD write as a direct dotted attribute path (no Device segment)", function (done) {
     loadEdgeNode({}, function () {
       var asset = setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      var payload = codec.encodePayload({
-        timestamp: Date.now(),
-        metrics: [{ name: "Plant1/Status", type: "String", value: "MAINTENANCE" }]
-      });
-      fakeMqtt.getLastFakeClient().simulateMessage("spBv1.0/TestGroup/NCMD/Edge1", payload);
+      lastFakeWorker().simulateNcmd([{ name: "Plant1/Status", value: "MAINTENANCE" }]);
 
       asset.getValue("Plant1.Status").should.equal("MAINTENANCE");
       done();
@@ -315,18 +272,13 @@ describe("kufayeka-sparkplug-edge-node", function () {
   it("re-publishes NBIRTH+DBIRTH on a \"Node Control/Rebirth\" NCMD (standard Sparkplug rebirth request)", function (done) {
     loadEdgeNode({}, function () {
       setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
-      fakeMqtt.getLastFakeClient().published = []; // only care about what happens AFTER the initial birth
+      lastFakeWorker().simulateStatus("connected");
+      lastFakeWorker().posted = []; // only care about what happens AFTER the initial birth
 
-      var payload = codec.encodePayload({
-        timestamp: Date.now(),
-        metrics: [{ name: "Node Control/Rebirth", type: "Boolean", value: true }]
-      });
-      fakeMqtt.getLastFakeClient().simulateMessage("spBv1.0/TestGroup/NCMD/Edge1", payload);
+      lastFakeWorker().simulateNcmd([{ name: "Node Control/Rebirth", value: true }]);
 
-      var topics = fakeMqtt.getLastFakeClient().published.map(function (p) { return p.topic; });
-      topics.should.containEql("spBv1.0/TestGroup/NBIRTH/Edge1");
-      topics.should.containEql("spBv1.0/TestGroup/DBIRTH/Edge1/Plant1");
+      postedOf("birth").length.should.equal(1);
+      should.exist(deviceBirthFor("Plant1"));
       done();
     });
   });
@@ -335,44 +287,38 @@ describe("kufayeka-sparkplug-edge-node", function () {
     it("defers NBIRTH/DBIRTH until the configured Primary Host STATE says online=true", function (done) {
       loadEdgeNode({ primaryHostId: "Ignition" }, function () {
         setupAssets(helper._RED);
-        var client = fakeMqtt.getLastFakeClient();
-        client.simulateConnect();
+        lastFakeWorker().workerData.primaryHostStateTopic.should.equal("spBv1.0/STATE/Ignition");
+        lastFakeWorker().simulateStatus("connected");
 
-        client.published.should.be.empty(); // still waiting -- nothing birthed yet
-        client.subscriptions[0].should.containEql("spBv1.0/STATE/Ignition");
+        postedOf("birth").length.should.equal(0); // still waiting -- nothing birthed yet
 
-        client.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: true, timestamp: 1 })));
+        lastFakeWorker().simulatePrimaryHostState(true, 1);
 
-        var topics = client.published.map(function (p) { return p.topic; });
-        topics.should.containEql("spBv1.0/TestGroup/NBIRTH/Edge1");
-        topics.should.containEql("spBv1.0/TestGroup/DBIRTH/Edge1/Plant1");
+        postedOf("birth").length.should.equal(1);
+        should.exist(deviceBirthFor("Plant1"));
         done();
       });
     });
 
-    it("immediately NDEATHs and restarts the whole connection when the Primary Host goes offline after being online", function (done) {
+    it("immediately restarts the connection when the Primary Host goes offline after being online, and re-defers the next birth", function (done) {
       loadEdgeNode({ primaryHostId: "Ignition" }, function () {
         setupAssets(helper._RED);
-        var firstClient = fakeMqtt.getLastFakeClient();
-        firstClient.simulateConnect();
-        firstClient.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: true, timestamp: 1 })));
-        firstClient.published = []; // only care about what happens after the birth now
+        lastFakeWorker().simulateStatus("connected");
+        lastFakeWorker().simulatePrimaryHostState(true, 1);
+        lastFakeWorker().posted = []; // only care about what happens after the birth now
 
-        firstClient.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: false, timestamp: 2 })));
+        lastFakeWorker().simulatePrimaryHostState(false, 2);
 
-        var deaths = decodedPublishesOf(firstClient).filter(function (p) { return p.topic === "spBv1.0/TestGroup/NDEATH/Edge1"; });
-        deaths.length.should.equal(1);
-        firstClient.ended.should.equal(true);
+        postedOf("restart-connection").length.should.equal(1);
 
         // [tck-id-message-flow-edge-node-birth-publish-phid-offline]: "...
-        // start the connection establishment process over" -- a brand new
-        // client/session, which must wait for Primary Host confirmation
-        // again rather than assuming it's still online.
-        var secondClient = fakeMqtt.getLastFakeClient();
-        secondClient.should.not.equal(firstClient);
-        secondClient.simulateConnect();
-        secondClient.published.should.be.empty();
-        secondClient.subscriptions[0].should.containEql("spBv1.0/STATE/Ignition");
+        // start the connection establishment process over" -- the SAME
+        // worker reconnects internally and reports "connected" again; this
+        // must wait for Primary Host confirmation again, not assume it's
+        // still online.
+        lastFakeWorker().posted = [];
+        lastFakeWorker().simulateStatus("connected");
+        postedOf("birth").length.should.equal(0);
         done();
       });
     });
@@ -380,18 +326,16 @@ describe("kufayeka-sparkplug-edge-node", function () {
     it("ignores a stale STATE message older than the last one already accepted", function (done) {
       loadEdgeNode({ primaryHostId: "Ignition" }, function () {
         setupAssets(helper._RED);
-        var client = fakeMqtt.getLastFakeClient();
-        client.simulateConnect();
+        lastFakeWorker().simulateStatus("connected");
 
-        client.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: true, timestamp: 100 })));
-        client.published = [];
+        lastFakeWorker().simulatePrimaryHostState(true, 100);
+        lastFakeWorker().posted = [];
         // An out-of-order, OLDER "offline" arriving after a newer "online"
-        // must be ignored -- otherwise a network reordering could bounce
-        // a perfectly healthy session.
-        client.simulateMessage("spBv1.0/STATE/Ignition", Buffer.from(JSON.stringify({ online: false, timestamp: 50 })));
+        // must be ignored -- otherwise a network reordering could bounce a
+        // perfectly healthy session.
+        lastFakeWorker().simulatePrimaryHostState(false, 50);
 
-        client.published.should.be.empty();
-        client.ended.should.equal(false);
+        lastFakeWorker().posted.length.should.equal(0);
         done();
       });
     });
@@ -408,36 +352,32 @@ describe("kufayeka-sparkplug-edge-node", function () {
       });
     }
 
-    it("publishes a DBIRTH for a newly-added top-level asset via applySchema, without needing a reconnect", function (done) {
+    it("posts a deviceBirth for a newly-added top-level asset via applySchema, without needing a reconnect", function (done) {
       loadEdgeNode({}, function () {
         pluginFactory(helper._RED);
         applySchemaWithTopLevelAssets(helper._RED, ["Plant1"]);
-        var client = fakeMqtt.getLastFakeClient();
-        client.simulateConnect();
-        client.published = [];
+        lastFakeWorker().simulateStatus("connected");
+        lastFakeWorker().posted = [];
 
         applySchemaWithTopLevelAssets(helper._RED, ["Plant1", "Plant2"]);
 
-        var topics = client.published.map(function (p) { return p.topic; });
-        topics.should.containEql("spBv1.0/TestGroup/DBIRTH/Edge1/Plant2");
-        topics.should.not.containEql("spBv1.0/TestGroup/NBIRTH/Edge1"); // no reconnect/rebirth needed for this
+        should.exist(deviceBirthFor("Plant2"));
+        postedOf("birth").length.should.equal(0); // no reconnect/rebirth needed for this
         done();
       });
     });
 
-    it("publishes a DDEATH (with a required seq number) for a top-level asset removed via applySchema", function (done) {
+    it("posts a deviceDeath for a top-level asset removed via applySchema", function (done) {
       loadEdgeNode({}, function () {
         pluginFactory(helper._RED);
         applySchemaWithTopLevelAssets(helper._RED, ["Plant1", "Plant2"]);
-        var client = fakeMqtt.getLastFakeClient();
-        client.simulateConnect();
-        client.published = [];
+        lastFakeWorker().simulateStatus("connected");
+        lastFakeWorker().posted = [];
 
         applySchemaWithTopLevelAssets(helper._RED, ["Plant1"]); // Plant2 removed
 
-        var ddeath = decodedPublishesOf(client).find(function (p) { return p.topic === "spBv1.0/TestGroup/DDEATH/Edge1/Plant2"; });
-        should.exist(ddeath, "DDEATH for the removed Plant2 was not published");
-        should.exist(ddeath.payload.seq, "DDEATH must include a sequence number");
+        var ddeath = postedOf("deviceDeath").find(function (m) { return m.deviceId === "Plant2"; });
+        should.exist(ddeath, "deviceDeath for the removed Plant2 was not posted");
         done();
       });
     });
@@ -445,21 +385,21 @@ describe("kufayeka-sparkplug-edge-node", function () {
 
   it("refuses to connect at all when the configured Group ID contains a reserved Sparkplug character", function (done) {
     loadEdgeNode({ groupId: "Bad+Group" }, function () {
-      // No mqtt.connect() call should have happened at all -- the fake
-      // client tracker stays null, proving connect() itself was never run.
-      should.not.exist(fakeMqtt.getLastFakeClient());
+      // No worker should have been created at all -- the fake tracker stays
+      // null, proving connect() itself was never run.
+      should.not.exist(lastFakeWorker());
       done();
     });
   });
 
   it("refuses to connect at all when the configured Edge Node ID contains a reserved Sparkplug character", function (done) {
     loadEdgeNode({ edgeNodeId: "Edge/1" }, function () {
-      should.not.exist(fakeMqtt.getLastFakeClient());
+      should.not.exist(lastFakeWorker());
       done();
     });
   });
 
-  it("warns but still publishes a DBIRTH when a DEVICE (asset) name contains a reserved Sparkplug character, rather than refusing outright", function (done) {
+  it("warns but still posts a deviceBirth when a DEVICE (asset) name contains a reserved Sparkplug character, rather than refusing outright", function (done) {
     loadEdgeNode({}, function () {
       var RED = helper._RED;
       pluginFactory(RED);
@@ -468,61 +408,41 @@ describe("kufayeka-sparkplug-edge-node", function () {
         assets: [{ id: "p1", name: "Bad/Plant", parentId: null, templateIds: ["tmpl"], attributes: {} }],
         historians: []
       });
-      fakeMqtt.getLastFakeClient().simulateConnect();
+      lastFakeWorker().simulateStatus("connected");
 
-      var publishes = decodedPublishesOf(fakeMqtt.getLastFakeClient());
-      var dbirth = publishes.find(function (p) { return p.topic === "spBv1.0/TestGroup/DBIRTH/Edge1/Bad/Plant"; });
-      should.exist(dbirth, "the (malformed but best-effort) DBIRTH was still published");
+      should.exist(deviceBirthFor("Bad/Plant"), "the (malformed but best-effort) deviceBirth was still posted");
       done();
     });
   });
 
-  it("closes promptly instead of hanging when the broker is already gone at shutdown time (the reported Ctrl+C bug)", function (done) {
+  it("close() posts a graceful close message and terminates the worker only after it acknowledges", function (done) {
     loadEdgeNode({}, function () {
       setupAssets(helper._RED);
-      var client = fakeMqtt.getLastFakeClient();
-      client.simulateConnect();
-      // Simulates the exact race reported in production: an embedded/local
-      // broker (or the real one) drops out from under this node in the
-      // SAME shutdown pass its own "close" handler runs in — by the time
-      // close fires, the client is already disconnected, still silently
-      // trying to reconnect underneath (ECONNREFUSED). Before the fix, the
-      // close handler unconditionally tried to publish NDEATH and waited
-      // on a PUBACK that could never arrive, hanging until Node-RED's own
-      // close-timeout killed it with "Error stopping node: Close timed
-      // out" — this asserts helper.unload()'s promise actually resolves
-      // (mocha's own 2000ms test timeout is the backstop if it hangs
-      // again) and that no doomed publish is even attempted.
-      client.connected = false;
-      client.published = [];
+      lastFakeWorker().simulateStatus("connected");
+      var worker = lastFakeWorker();
 
       helper.unload().then(function () {
-        client.published.should.be.empty();
-        client.ended.should.equal(true);
+        var closeMsgs = worker.posted.filter(function (m) { return m.type === "close"; });
+        closeMsgs.length.should.equal(1);
+        worker.terminated.should.equal(true);
         done();
       });
+      // The worker acknowledges asynchronously, same as the real one would
+      // after its own NDEATH-then-end sequence completes.
+      setImmediate(function () { worker.emit("message", { type: "closed" }); });
     });
   });
 
-  it("publishes NDEATH on a clean shutdown (node 'close'), in addition to the MQTT Will already registered for an ungraceful one", function (done) {
+  it("close() still resolves (doesn't hang) even if the worker never acknowledges — the 1.5s grace-timer fallback", function (done) {
+    this.timeout(4000);
     loadEdgeNode({}, function () {
       setupAssets(helper._RED);
-      fakeMqtt.getLastFakeClient().simulateConnect();
-      var client = fakeMqtt.getLastFakeClient(); // helper.unload() below will null out module-level state via afterEach
+      lastFakeWorker().simulateStatus("connected");
+      var worker = lastFakeWorker();
+      // Deliberately never emitting {type:"closed"} back.
 
-      // A node's "close" handler is invoked by Node-RED's own flow-teardown
-      // (triggered here via helper.unload(), same as every other test's
-      // afterEach already does implicitly) — not by calling .close()
-      // directly on the node instance, which isn't how node-red-node-test-
-      // helper's lifecycle works. The Will payload registered at connect()
-      // time already carries the bdSeq/death shape — this asserts the
-      // GRACEFUL path publishes the equivalent message itself too, rather
-      // than relying solely on the broker to deliver the Will (which only
-      // fires on an ungraceful drop).
       helper.unload().then(function () {
-        var death = client.published.find(function (p) { return p.topic === "spBv1.0/TestGroup/NDEATH/Edge1"; });
-        should.exist(death, "NDEATH was not published on clean shutdown");
-        client.ended.should.equal(true);
+        worker.terminated.should.equal(true);
         done();
       });
     });
