@@ -57,7 +57,7 @@ describe("AssetPlugin (Runtime & Admin REST API)", function() {
     registeredPlugin.id.should.equal("kufayeka-asset-engine");
   });
 
-  it("should trigger comms publish on asset changes when plugin is added", function() {
+  it("should trigger comms publish on asset changes when plugin is added", function(done) {
     pluginFactory(mockRED);
     registeredPlugin.def.onadd();
 
@@ -71,8 +71,50 @@ describe("AssetPlugin (Runtime & Admin REST API)", function() {
     });
 
     mockRED.asset.setAttribute("Motor1.Speed", 1750);
-    publishedComms.length.should.be.greaterThan(0);
-    publishedComms.some(c => c.topic === "assets/changed" || c.topic === "kufayeka/asset").should.be.true();
+    // Attribute writes reach the editor batched (asset-plugin.js createAssetChangeBatcher).
+    setTimeout(function () {
+      try {
+        publishedComms.some(c => c.topic === "assets/changed").should.be.true();
+        done();
+      } catch (e) { done(e); }
+    }, 150);
+  });
+
+  it("should batch attribute writes into one merged assets/changed per window (last value wins) and never publish kufayeka/asset", function(done) {
+    pluginFactory(mockRED);
+    registeredPlugin.def.onadd();
+    mockRED.asset.replaceState({
+      attributeTemplates: [
+        { id: "tmpl-motor", name: "MotorTemplate", attributes: [{ name: "Speed", valueType: "number", default: 0 }, { name: "Temp", valueType: "number", default: 0 }] }
+      ],
+      assets: [
+        { id: "m1", name: "Motor1", parentId: null, templateIds: ["tmpl-motor"], attributes: { Speed: { value: 1 }, Temp: { value: 1 } } }
+      ]
+    });
+    publishedComms.length = 0;
+
+    for (let i = 2; i <= 50; i++) mockRED.asset.setAttribute("Motor1.Speed", i);
+    mockRED.asset.setAttribute("Motor1.Temp", 99);
+    publishedComms.filter(c => c.topic === "assets/changed").length.should.equal(0, "nothing sent synchronously per write");
+
+    setTimeout(function () {
+      try {
+        const sent = publishedComms.filter(c => c.topic === "assets/changed");
+        // The asset controller is a module-level singleton, so an earlier
+        // test's onadd() listener is still subscribed too — each listener
+        // must have sent exactly ONE merged message (not 50).
+        sent.length.should.be.within(1, 3);
+        sent.forEach(function (s) {
+          s.data.change.type.should.equal("attribute.set");
+          const changes = s.data.change.changes;
+          changes.map(c => c.path).should.eql(["Motor1.Speed", "Motor1.Temp"]);
+          changes[0].value.should.equal(50);
+          changes[1].value.should.equal(99);
+        });
+        publishedComms.some(c => c.topic === "kufayeka/asset").should.be.false();
+        done();
+      } catch (e) { done(e); }
+    }, 150);
   });
 
   it("should register all REST admin endpoints", function() {
